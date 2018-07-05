@@ -1,0 +1,29 @@
+* Introduction
+
+** Facts
++ The names of all relationships and objects must begin with a lower-case letter.
++ The relations is written first, and the objets are written separated by commas, and the objects a encolosed by a pair of round brackets.
++ The dot character '.' must come at the end of a fact. The dot is what some people also call a "period" or a "full stop".
+
+We use facts to define relationships between objects.
+For example: likes(john, mary). is not equal to likes(mary, john).
+The first is John likes Mary and the second is Mary likes John.
+Each time a name is used, the name refers to a particular individual object.
+The names of the objects that are enclosed within the round brackets in each fact are called the *arguments*.
+The names of the relationship is called predicate.
+Realtionships can have arbitrary number of arguements, just like:
+#+BEGIN_EXAMPLE prolog
+play(john, mary, football).
+play(jane, jim, badminton).
+#+END_EXAMPLE
+We can also declare facts that are not true in read world.
+In prolog, a collection of cates is called a _database_.
+
+** Questions
+Once we have some facts, we can ask some *questions* about them.
+The special symbol is written as a question mark followed by a hyphen, just like this:
+#+BEGIN_EXAMPLE prolog
+?- owns(mary, book).
+#+END_EXAMPLE
+This question is asking /Does Mary own/ /the book/, or /Is it a fact that Mary owns the book?/.
+When a question is asked of a Prolog system, it will search through the database.
