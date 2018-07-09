@@ -66,3 +66,28 @@ As each goal in turn becomes satisfied, it leaves behind a place-markder in the 
 Any time a goal fails, Prolog goes back and attempts to satisfy its left-hand neighbour, starting from its place-markder.
 If the first goal fails, then it does not have a lefthand neighbour it can attempt to re-satisfy. In this case, the entire conjunction fails.
 Where Prolog repeatedly attempts to satisfy and re-satisfy goals in a conjunction, is called /backtracking/.
+** Rules
+Rules are used when you want to say that a fact depends on a group of other facts. In English, we use the word "if" to express a rule.
+#+BEGIN_EXAMPLE
+I used an umbrella if there is rain.
+John buys the wine if it is less expensive then the beer.
+#+END_EXAMPLE
+Or:
+#+BEGIN_EXAMPLE
+X is a bird if:
+      X is an aninaml, and
+      X has fathers.
+#+END_EXAMPLE
+A rule is a general statement about objects and their relationships.
+In Prolog a rule consists of a head and a body. The head and body are connected by the symbol ":-".
+The ":-" is pronounced if.
+Notice that rules also end with a dot.
+#+BEGIN_SRC prolog
+/*John likes anyone who likes wine and food*/
+likes(john, X) :- likes(X, wine), likes(X, food).
+#+END_SRC
+Whenever we look at a Prolog rule, we should take notice of where the variables are.
+In the above rule, the vaiable X is used three times. WHenever X becomes instantiated to some object, all X's instantiated /within the scope of X/.
+There are two ways to provide information about a given predicate such as likes. We provide both facts and rules.
+In general a predicate is defined by a mixture of afcts and rules.THese are called the /clauses/ for a predicate. We'll use the word /clause/ whenever we refer to either a fact or a rule.
+The comment si something enclosed between /'//*...*/'/ brackets. Comments are ignored by Prolog.
