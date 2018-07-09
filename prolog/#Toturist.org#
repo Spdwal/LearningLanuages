@@ -58,3 +58,11 @@ We represent this by putting a comma between the goals.
 ?- likes(john, mary), likes(mary, john).
 #+END_SRC
 The comma is pronounced "and", and it serves to separate any number of different goals that have to be satisfied in order to answer a question.
+When a sequence of goals is given to prolog, prolog attempts to satisfy each goal in turn by searching for a unifying goal in database. All goals have to be satisfied in order for the sequence to be satisfied.
+When a goal fail, we must to re-satisfy the previous goal. When we re-satisfy the previous goal successfully, Prolog is not trying to re-satisfy the current goal, bot entering the goal again.
+Since this goal was satisfied, prolog also marks its place in the database, in case we want to re-satisfy the goal.
+There is a place-marker in the database for each goal that Prlog is attempting to satisfy.
+As each goal in turn becomes satisfied, it leaves behind a place-markder in the database. in case that the goal needs to be re-satisfied at a later time.
+Any time a goal fails, Prolog goes back and attempts to satisfy its left-hand neighbour, starting from its place-markder.
+If the first goal fails, then it does not have a lefthand neighbour it can attempt to re-satisfy. In this case, the entire conjunction fails.
+Where Prolog repeatedly attempts to satisfy and re-satisfy goals in a conjunction, is called /backtracking/.
