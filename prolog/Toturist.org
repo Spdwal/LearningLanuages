@@ -12,10 +12,10 @@ Each time a name is used, the name refers to a particular individual object.
 The names of the objects that are enclosed within the round brackets in each fact are called the *arguments*.
 The names of the relationship is called predicate.
 Realtionships can have arbitrary number of arguements, just like:
-#+BEGIN_EXAMPLE prolog
+#+BEGIN_SRC prolog
 play(john, mary, football).
 play(jane, jim, badminton).
-#+END_EXAMPLE
+#+END_SRC
 We can also declare facts that are not true in read world.
 In prolog, a collection of cates is called a _database_.
 
@@ -27,3 +27,27 @@ The special symbol is written as a question mark followed by a hyphen, just like
 #+END_EXAMPLE
 This question is asking /Does Mary own/ /the book/, or /Is it a fact that Mary owns the book?/.
 When a question is asked of a Prolog system, it will search through the database.
+If prolog find a fact that unifies with the question, Prolog will respond yes. If no such fact exists in the database. Prolog will respond no
+The ansuer no is used to mean /nothing unifies with the question/.
+No is not the same as /false/.
+** Variables
+In prolog we can not only name particular objects, but also can use terms like X to stand for objects that we can unwilling or unable to name.
+Terms of this second kind are called /variables/.
+When Prolog used a variable, the vairable can be either /instaniated/ or /not instantiated./
+When prolog is asked a question containing a variable, Prolog searches through all its facts to find an object that the variable could stand for.
+#+BEGIN_SRC prolog
+likes(john, flowers).
+likes(john, mary).
+likes(paul, mary).
+
+?- likes(john, X).
+#+END_SRC
+
+#+RESULTS:
+: X = flowers
+How does this work? When prolog is adked this question, the variable X is initially not instantiated. Prolog searches through the database, looking for a fact that unifies with the question.
+Now if an uninstantiated variable Prolog will allow that argument to unify with any other argument in the same position in the fact.
+We say that X is instantiated to flowers. Prolog not marks the place in the database where a unifier is found.
+Now if we press Enter key, meaning we are satisifed with just one answer, then Prolog will stop searching for more.If instead we press the semicolon key ";", Prolog will resume its search through the database as before.
+starting from where it /left the place-marker/, to find another possible answer to the question.
+When prolog begins searching from a place-marker instead of from the beginning of the database, we say that prolog is attempting to re-satisfy yhe question.
