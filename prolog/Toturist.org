@@ -114,3 +114,34 @@ Structures are called "compound terms" in Standard Prolog.
 A structure is a single object consisiting of a collection of other objects, called components. The components are grouped together into a single structure for convenience in handling them.
 Structures help to organise the data in a program because they permit a group of related information to be treated as a single object instead of as separate entities.
 A structure is written in Prolog by specifying its functor and its components.
+The functor names the general kind of structure, and corresponds to datatype in an ordinary programming language. The commponents are enclosed in round brackets and separated by commas.
+Consider the following fact, that John owns the book called /Wuthering/ /Heights/, by Emily Bronte:
+#+BEGIN_SRC prolog
+owns(john, book(wuthering_heights, emily_bronte)).
+#+END_SRC
+If we like, we can also have another structure for the author's name.
+#+BEGIN_SRC prolog
+owns(john, book(wuthering_heights, author(emily, bronte))).
+#+END_SRC
+Sturctures may participate in the process of question-answering using variables.
+#+BEGIN_SRC prolog
+?- owns(john, book(X, author(Y, bronte))).
+#+END_SRC
+** Characters
+The names of constants and variables are built up from strings of characters.
+Prolog recognises two kinds of characters: printing characters and not-printing characters.
+Printing characters cause a symbol to appear on our computer terminal's display.
+Non-printing characters do not cause a symbol to appear, but cause an action to be carried out.
+** Operators
+Sometimes it is convenient to write some functors as operators. This is a form of syntax that makes some structures easier to read.
+If we had to write the arithmetic expression "x + y * z" in the normal way for structures, it would look like this: +(x, *(y, z)), and it would be a legal Prolog term.
+It is important to note that the operators do not "cause" any arithmetic to be carried out.
+The term 3 + 4 is another way to write the term +(3, 4), which is a data sturcture.
+To know how to read arithmetic expressions that have operators in them, we need to know three things about each operator: its /position/, its /precedence/. and its /associativity./
+Operators like plus, hyphen, asterisk and slash are written between their arguments, so we call then *infix* operators.It is also possible to put operators before their arguments. as in "-x + y".
+Operators that come before their arguments are called *prefix* operators. Finally some operators may come after their arguments. For example, the factorial operator,
+Operators that are written after their arguments are called *postfix* operator.
+The precedence of an operator is used to indicate which operation is carried out first. Each operator that is used in Prolog has a /precedence/ class associated with it.
+The precedence class is an integer that is associated with an operator.
+We must be able to tell whether an operator is left associative or right associative.
+In practice, people tend to use round bracktes for expressions that may be difficult to understand because of the precedence and associativity rules.
