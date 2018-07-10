@@ -145,3 +145,22 @@ The precedence of an operator is used to indicate which operation is carried out
 The precedence class is an integer that is associated with an operator.
 We must be able to tell whether an operator is left associative or right associative.
 In practice, people tend to use round bracktes for expressions that may be difficult to understand because of the precedence and associativity rules.
+** Equality and Unification
+#+BEGIN_SRC prolog
+?- X = Y.
+#+END_SRC
+Prolog attempts to make X and Y equal. The equality predicate is built-in.
+The following question succeeds causing X to be instantiated to the structure rides(student, bicycle).
+#+BEGIN_SRC prolog
+?- rides(student, bicycle) = X.
+#+END_SRC
+Integers and atoms are alwats equal to themselves.
+Two structures are equal if they have the same functor and number of components, and all the corresponding components are equal.
+Sturcture can be nested one inside antoher to any depth.
+The following goal
+#+BEGIN_SRC  prolog
+a(b, C, d(e, F, g(h, i, J))) = a(B, c d(E, f, g(H, i, j))).
+#+END_SRC
+would succeed and causes B to be instantiated to B, C to c, E to e, F to f, H to h.and J to j. The goal succees and the two variables share.
+If two variables share, then whenever one of them becomes instantiated to some term, the other one automatically is instantiated to the same term.
+** Arithmetic
