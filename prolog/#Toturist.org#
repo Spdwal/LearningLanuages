@@ -114,3 +114,16 @@ Structures are called "compound terms" in Standard Prolog.
 A structure is a single object consisiting of a collection of other objects, called components. The components are grouped together into a single structure for convenience in handling them.
 Structures help to organise the data in a program because they permit a group of related information to be treated as a single object instead of as separate entities.
 A structure is written in Prolog by specifying its functor and its components.
+The functor names the general kind of structure, and corresponds to datatype in an ordinary programming language. The commponents are enclosed in round brackets and separated by commas.
+Consider the following fact, that John owns the book called /Wuthering/ /Heights/, by Emily Bronte:
+#+BEGIN_SRC prolog
+owns(john, book(wuthering_heights, emily_bronte)).
+#+END_SRC
+If we like, we can also have another structure for the author's name.
+#+BEGIN_SRC prolog
+owns(john, book(wuthering_heights, author(emily, bronte))).
+#+END_SRC
+Sturctures may participate in the process of question-answering using variables.
+#+BEGIN_SRC prolog
+?- owns(john, book(X, author(Y, bronte))).
+#+END_SRC
