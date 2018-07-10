@@ -164,3 +164,45 @@ a(b, C, d(e, F, g(h, i, J))) = a(B, c d(E, f, g(H, i, j))).
 would succeed and causes B to be instantiated to B, C to c, E to e, F to f, H to h.and J to j. The goal succees and the two variables share.
 If two variables share, then whenever one of them becomes instantiated to some term, the other one automatically is instantiated to the same term.
 ** Arithmetic
+Arithmetic operations arte useful for comparing numbers and for calculating results.
+Prolog provides certain built-in predicates for comparing numbers. Actually these predicates evaluate terms that are treated as arithmetic expressions.
+The arguments could be variables instantiated to integers or they could be integers written as constants, or they could be more general expressions.
+#+BEGIN_SRC prolog
+X =:= Y /* X and Y stand for the name number*/
+X =\= Y /* X and Y stand for different numbers*/
+X < Y   /* X is less than Y*/
+X > Y   /* X is greater than Y*/
+X =< Y  /* X is less than or equal to Y*/
+X >= Y  /* X is greater than or equal to Y*/
+#+END_SRC
+However Prolog will not allow further facts to be added to predicates that are built in to Prolog.This prevents you from changing the meaning for build-in predicates in unexpected ways.
+Arithmetic can also be used for calculation.
+#+BEGIN_SRC prolog
+pop(usa, 203).
+pop(india, 548).
+pop(china, 800).
+pop(brazil, 108).
+
+area(usa, 3).
+area(india, 1).
+area(china, 4).
+area(brazil, 3).
+
+density(X, Y) :-
+    pop(X, P),
+    area(X, A),
+    Y is P / A.
+#+END_SRC
+The "is" operator is new. The "is" operator is an infix operator. Its right-hand argument is a term which is interpreted as an arithmetic expression.
+To satisfy an "is", Prolog first evaluates its right-hand argument according to the rules of arithmetic.
+This means that the values of all the variables on the right of an "is" must be known.
+We need to use the "is" predicate any time we reqire to evaluate an arithmetic expression.
+Depending on what computer we use, various arithmetic operators can be used on the right-hand side of the "is" operator.
+#+BEGIN_SRC prolog
+X + Y    /* The sum of X and Y*/
+X - Y    /* The difference of X and Y*/
+X * Y    /* The product of X and Y*/
+X / Y    /* The quotient of X divided by Y*/
+X// Y    /* The integer quotient of X divided by Y*/
+X mod Y  /* The remainder of X divided by Y*/
+#+END_SRC
