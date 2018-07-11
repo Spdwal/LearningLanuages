@@ -206,3 +206,23 @@ X / Y    /* The quotient of X divided by Y*/
 X// Y    /* The integer quotient of X divided by Y*/
 X mod Y  /* The remainder of X divided by Y*/
 #+END_SRC
+
+** Summary of Satisfying Goals
+Prlog performs a task in response to a question from the programmer. A question provides a conjunction of goals to be satisfied. Prolog used the known clauses to satisfy the goals.
+A fact can cause a goal to be satisfied immediately, whereas a rule can only reduce the task to that of satisfying a conjunction of subgoals.
+However, a cause can only be used if it unifies the goal under consideration.It a goal cannot be satisfied, backtracking will be initiated.
+Backtracking consists of reviewing what has been done, attempting to re-satisfy the goals by finding an alternative way to satisfying them.
+*** Consideration of golas in backtracking
+When a failture is genreated, the "flow of satisfaction" pass back along the way it has come.
+This involves retreating back into boxes that have previously been left in order to re-satisfy the goals.
+First it makes uninstantiated all variables that had been instantiated int the course of satisfying the goal.
+Then it searches through the database from where the place-marker was put.If it finds another unifying possibility, it marks the place, and things continue.
+If no other unifying possibility can be found, the goal fails, and the arrow retreats further until it comes to another place-marker.
+*** Unification
++ An uninstantiated variable will unify with any object. As a result, that object will be what the variable stands for.
++ Otherwise, an interger or atom will unify with only itself.
++ Otherwise, a structure will unify with another structure with the same functor and number of arguments, and all the corresponding auguments must unify.
+If we actually wanted to compute a sum, we would use the "is" predicate. We would write
+#+BEGIN_SRC prolog
+?= X is 2 + 3.
+#+END_SRC
