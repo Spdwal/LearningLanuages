@@ -1,2 +1,8 @@
-*.pdf
 a.out
+.DS_Store
+
+#LaTex
+*.aux
+*.log
+*.toc
+Latex/Chapter_*/.texpadtmp/*
