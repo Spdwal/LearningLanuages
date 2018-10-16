@@ -22,5 +22,13 @@ libapue.h是apue.h头文件中包含的函数和宏的具体实行，是一个�
 ```shell
 echo “yourldpath” > /etc/ld.so.conf.d/myldpath.conf
 ```
-
-
+然而很尴尬的是。。。我在OS X中并没有找到这个文件夹，OS X使用的是另一套链接器，但是通过实践之下，我还是得出结论：_OS X的静态链接地址还是/usr/local/lib/_，可以放心使用。
+APUE环境就此搭建完成，在编译书上的代码的时候，只需要
+```c
+#include<apue.h>
+```
+然后运行命令
+```shell
+gcc finename.c -lapue
+```
+即可编译生成可执行文件。一定记得-lapue不可省，顺序不可乱，否则会出现链接错误。

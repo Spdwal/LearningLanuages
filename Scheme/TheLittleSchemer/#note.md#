@@ -1,0 +1,8 @@
+# The Litter Schemer
+
+## Chapter 1: Toys
+
+### Atom
+Atom是一串字母或者数字的组合，或者是数个Atom的组合，注意list也是一个Atom，所以list和Atom的组合还是一个Atom。
+
+### car
