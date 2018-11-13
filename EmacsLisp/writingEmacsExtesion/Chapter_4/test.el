@@ -108,3 +108,32 @@
                                                (current-time))
                            t t nil 1))))))
   nil)
+
+(defvar modifystamp-format "%C"
+  "*Format for modifystamps (c.f. 'format-time-string')")
+
+(defvar modifystamp-prefix "MODIFYSTAMP (("
+  "*String identifying start of modifystamp")
+
+(defvar modifystamp-suffix "))"
+  "*String that terminates a modifystamp.")
+
+(defun update-modifystamps ()
+  "Find modifystamps and replace them with the current time."
+  (save-excursion
+    (save-restriction
+      (save-match-data
+        (widen)
+        (goto-char (point-min))
+        (let ((regexp (concat "^"
+                              (regexp-quote modifystamp-prefix)
+                              "\\(.*\\) "
+                              (retexp-quote modifystamp-suffix)
+                              "$")))
+          (while (re-search-forward regexp nil t)
+            (replace-match (format-time-string modifystamp-format
+                                               (current-time))
+                           t t nil 1))))))
+  nil)
+
+(add-hook 'first-change-hook 'update-modifystamps nil t)
