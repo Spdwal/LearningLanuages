@@ -311,5 +311,85 @@ bool list_contains(int value_to_find){
 
 不要将受保护数据的指针或者引用传递到互斥锁作用域之外，无论是函数的返回值，还是存储在外部的可见内存，或者以参数的形式传递到用户提供的函数中去。
 
+虽然接口内部可能实现了线程安全，但是在接口和接口之间却可能存在着条件竞争。如下例：
 
+```c++
+template<typename T, typename Container=std::deque<T>>
+class stack{
+public:
+	explicit stack(const Container&);
+	explicit stack(Container && = Container());
+	template<class Alloc> explicit stack(const Alloc&);
+	template<class Alloc> stack(const Container&, const Alloc&);
+	template<class Alloc> stack(Container&&, const Alloc&);
+	template<class Alloc> stack(stack&&, const Alloc&);
+	
+	bool empty() const;
+	size_t size() const;
+	T& top();
+	T const& top() const;
+	void push(T const&);
+	void push(T&&);
+	void pop();
+	void swap(stack&&);
+};
 
+stack<int> s;
+if(!s.empty()){
+    int const value = s.top();
+    s.pop();
+    do_something(value);
+}
+```
+
+在上述代码中，如果是顺序单线程执行的话，并没有问题，但是如果是在多线程中执行的话，可能在s.empty()和s.pop()之间，被其他线程给修改了此stack，使其变为了空stack，对空stack使用pop会触发未定义行为，这种就是结构固有的问题。
+
+解决方式之一就是使用互斥量来保护top和pop两个成员函数，但是，同样没有银弹。
+
+在std::stack::pop中，设计人员先获取顶部元素，再从栈中移除数据，正常的情况下这是没有问题的，避免数据移除后却没有拷贝出去，但是存在一个问题，如果在return时，由于别的线程使用完了内存，导致返回值的拷贝构造函数抛出异常bad_alloc，那么依然会出现数据没有正确拷贝出去的情况。依然会出现条件竞争，幸运的是我们还有别的选项可以使用。
+
++ 传入一个引用。
+
+  ```c++
+  std::vector<int> result;
+  some_stack.pop(result);
+  ```
+
+  但是这样子的话需要构造一个栈中类型的实例，对性能有很大的影响。
+
++ 无异常抛出拷贝构造函数或者移动构造函数。
+
+  局限性太强，用户自定义的类型，并不一定满足这个要求。
+
++ 返回指向弹出值的指针
+
+  如果采用原生指针，那么就带来了内存管理方面的问题，如果使用智能指针，那么伴随而来的就是内存的开销问题。
+
++ 选项1+2或者选项1+3
+
+  ```c++
+  #include<exception>
+  #include<memory>
+  
+  struct empty_stack: std::exception
+  {
+  	const char* what() const throw();
+  };
+  
+  template<typename T>
+  class threadsafe_stack{
+  public:
+      threadsafe_stack();
+      threadsafe_stack(const threadsafe_stack&);
+      threadsafe_stack& operator=(const threadsafe_stack&) = delete;
+      
+      void push(T new_value);
+      std::shared_ptr<T> pop();
+      void pop(T& value);
+      bool empty() const;
+  };
+  ```
+
+  不过总觉得这样的实现有点画蛇添足，只是单纯的重载了两个成员函数，根据情况进行使用而已。
+
+  锁的粒度大小非常重要，粒度太小，没有办法锁住所有的想要保护的数据，锁的粒度太大的话，会造成性能的巨大浪费。
