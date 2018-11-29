@@ -393,3 +393,131 @@ if(!s.empty()){
   不过总觉得这样的实现有点画蛇添足，只是单纯的重载了两个成员函数，根据情况进行使用而已。
 
   锁的粒度大小非常重要，粒度太小，没有办法锁住所有的想要保护的数据，锁的粒度太大的话，会造成性能的巨大浪费。
+
+  #### 死锁
+
+  一对线程需要对它们所有的互斥量做一些操作，其中每个线程都有一个互斥量，且等待另一个解锁，这样就没有线程能工作，因为它们都在等待对方释放互斥量，这种情况就是死锁。它最大的问题就是由两个或者两个以上的互斥量来锁定一个操作。
+
+  避免死锁的一般建议就是让两个互斥量以相同的顺序上锁：总是在互斥量B之前锁住互斥量A，就永远不会死锁。
+
+  std::lock可以一次性锁住多个的互斥量，且没有副作用(死锁)。
+
+  ```c++
+  class some_big_object;
+  void swap(some_big_object& lhs, some_big_object& rhs);
+  class X{
+  private:
+      some_big_object some_detail;
+      std::mutex m;
+  public:
+      x(some_big_object const& d): some_detail(sd){}
+      
+      friend void swap(X& rhs, X& rhs){
+          if(&rhs == & lhs){
+              return;
+          }
+          
+          std::lock(lhs.m, rhs.m);
+          
+          std::lock_guard<std::mutex> lock_a(lhs.m, std::adopt_lock);
+          std::lock_guard<STD::mutex> lock_b(rhs.m, std::adopt_lock);
+          
+          swap(lhs.some_detail, rhs.some_detail);
+      }
+  }
+  ```
+
+  当std::lock成功获取了第N个互斥量上的锁的时候，当尝试从第N+1个互斥量中再获取锁的时候，就会有异常抛出，然后依次释放之前的所有锁，所以std::lock要不就都锁住，要不就都锁不住。
+
+  然后通过将锁和std::adopt_lock同时传入lock_guard中，将被lock锁住的锁交给lock_guard管理，而不是让lock_guard再创建一个锁。
+
+  但是lock没有办法通过api对其中的单个锁进行操作，只能通过开发者来确保。
+
+  但是有锁并不是死锁的必要条件，如果两个线程A和B，A中调用了B.join()，B中调用了A.join()，那么这两个线程就会产生死锁，因为它们正在互相等待。
+
+  下面为一下避免死锁的建议：
+
+  ##### 避免嵌套锁
+
+  一个线程获取一个锁时，不要再去获取第二个锁。如果确实需要获取多个锁的时候，使用一个std::lock来做这个事情，避免产生死锁
+
+  ##### 避免在持有锁时调用给用户提供的代码
+
+  因为给用户代码我们并不知道他会做什么，可能在代码中就使用了锁，这样就有可能产生死锁。
+
+  ##### 使用固定书序获取锁
+
+  当必须使用多个锁，且不能使用std::lock来获取它们的时候，用固定的顺序获取它们。
+
+  ##### 使用锁的层次结构
+
+  对应用进行分层，并且识别在给定层上所有的可上锁的互斥量，当代码企图对一个互斥量上锁，在该层锁已经被底层持有时，上锁是不允许的。可以在运行时对其进行检查，痛殴分配层数到每个互斥量上，以及记录每个线程上锁的互斥量。
+
+  ```
+  hierarchical_mutex high_level_mutex(1000);
+  hierarchical_mutex low_level_mutex(5000);
+  
+  int do_low_level_stuff();
+  
+  int low_level_func(){
+      std::lock_guard<hierarchical_mutex> lk(low_level_mutex);
+      return do_low_level_stuff();
+  }
+  
+  void high_level_stuff(int some_param);
+  
+  void high_level_func(){
+      std::lock_guard<hierarchical_mutex>lk(high_level_mutex);
+      high_level_stuff(low_level_func());
+  }
+  
+  void thread_a(){
+      high_level_func();
+  }
+  
+  hierarchical_mutex(100);
+  void do_other_stuff();
+  
+  void other_stuff(){
+      high_level_func();
+      do_other_stuff();
+  }
+  
+  void thread_b(){
+      std::lock_guard<gierarchical_mutex> lk(other_mutex);
+      other_stuff();
+  }
+  ```
+
+  大致的意思就是层级锁内保存一个int作为他的层级，当层级较低的锁被该线程持有的情况下，他不能获得层级较高的锁。当层级错误时候可能会抛出一个异常，或者直接终止程序。
+
+  但是当多个同层级的互斥锁不能同时持有，所以在有些设计上没有办法用到。
+
+  死锁并不一定只会发生在锁之间，它也会发生在任何同步构造中——可能会产生一个等待循环。
+
+  ##### std::unique_lock——灵活的锁
+
+  unique_lock和lock_guard最大的不同在于，它的实例并不会一直占有一个锁。如果你将std::adopt_lock作为第二个参数传入，这个参数会告诉构造函数获得一个已经被锁住的mutex。如果第二个参数是std::defer_lock，它表示在构造这个unique_lock时，这个mutex暂时不会被加锁，只有调用了std::unique::lock或者std::unique_lock被传入std::lock()的时候，它才会被加锁。std::unique_lock虽然更加灵活，但是它却需要更多的空间，并且性能上也比std::lock_guard要差一些。这一切都是存储了是否要加锁的信息的代价。
+
+  ```c++
+  class some_big_object;
+  bool operator<(come_big_object& lhs, some_big_object& rhs);
+  
+  class X{
+  private:
+  	some_big_object some_detail;
+      mutable std::mutex m;
+  public:
+      x(some_big_object const& sd):some_detail(sd){}
+      
+      friend bool operator<(X const& lhs, X const& rhs){
+          if(&lhs==&rhs){
+              return false;
+          }
+          std::unique_lock<std::mutex> lock_a(lhs.m, std::defer_lock);
+          std::unique_lock<std::mutex> lock_b(rhs.m, std::defer_lock);
+          std::lock(lock_a, lock_b);
+          return lhs.some_detail<rhs.some_detail;
+      }
+  };
+  ```
