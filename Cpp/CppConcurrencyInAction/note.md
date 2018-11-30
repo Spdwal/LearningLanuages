@@ -629,3 +629,94 @@ void foo(){
 std::mutex已经在c++17中支持，环境clang++ 10.0。
 
 当一个线程获得一个已经上锁的mutex，并对其再次上锁，这个操作是错误的。但是标准库提供了std::recursive_mutex，它可以在同一个线程内多次上锁，但是允许其他线程访问的时候，必须释放所有的锁。
+
+# 同步并发操作
+
+## 等待一个时间或者其他条件
+
+当一个线程等待另一个线程完成任务时，它会有很多选择。
+
+1. 持续的检查共享数据标识位，知道另一线程完成工作时对这个标识位进行重设，不过这会浪费线程执行时间。
+
+2. 选择在检查间隙，调用std::this_thread::sleep_for()进行周期性的睡眠。
+
+   ```
+   bool flag;
+   std::mutex m;
+   
+   void wait_for_flag(){
+       std::unique_lock<std::mutex> lk(m);
+       while(!flag){
+           lk.unlock();
+           std::this_thread_sleep_for(std::chrono::milliseconds(100));
+           lk.lock();
+       }
+   }
+   ```
+
+   这个实现比第一种要好很多，但是它很难确定正确的休眠时间，太长的休眠时间可能会让任务等待线程醒来。
+
+3. 使用C++标准库提供的工具去等待事件的发生。
+
+### 等待任务达成
+
+C++标准库对条件变量有两套实现：std::condition_variable和std::condition_variable_any。这两个实现都包含在condition_variable头文件声明中，两者都需要与一个互斥量一起才能工作，前者只能和std::mutex一起工作，后者可以和任何满足最低标准的互斥量一起工作。但是std::condition_variable_any会在体积，性能，以及系统资源的使用方面产生额外的开销，所以一般将std::condition_variable作为首选的类型。
+
+```c++
+std::mutex mut;
+std::queue<data_chunk> data_queue;
+std::condition_variable data_cond;
+
+void data_preparation_thread()
+{
+    while(more_data_to_prepare()){
+        data_chunk const data = prepare_data();
+        std::lock_guard<std::mutex> lk(mut);
+        data_queue.push(data);
+        //给持有data_cond的线程发送一个唤醒信号
+        data_cond.notify_one();
+    }
+}
+
+void data_processing_thread(){
+    while(true){
+        //必须使用unique_lock，因为涉及到提前解锁的操作。
+        std::unique_lock<std::mutex> lk(mut);
+        //如果接受到了一个notify_one信号，且传入的conditon为true，则此线程唤醒，获得锁，
+        //先接到信号，然后获得锁，然后检查cond，如果为真就唤醒，如果为false，就释放锁。
+        //所以需要使用unique_lock来加锁
+        data_cond.wait(lk, []{return !data_queue.empty();});
+        data_chunk data = data_queue.front();
+        data_queue.pop();
+        lk.unlock();
+        process(data);
+        if(is_last_chunk(data))
+            break;
+    }
+}
+```
+
+###### 虚假唤醒
+
+```c++
+std::condition_variable con_var;
+...
+if(cond == false){
+	con_var.wait(lock);
+    do_something();
+}
+```
+
+当cond为false时候，此线程需要等待另一个notify信号，然后一个线程使cond == true，发送一个信号，然后此线程开始与其他线程进行互斥量的争夺，如果竞争失败，那么其他线程对cond进行了处理，再然后此线程获得锁，调用do_something(),此时便产生了UB。
+
+```c++
+std::condition_variable con_var;
+...
+while(cond == false){
+    con_var.wait(lock);
+}
+do_something();
+```
+
+上述代码可以很好的防止虚假唤醒，因为在获取锁之后，如果cond被修改，它又进入while循环，然后进入等待状态，释放自己的锁。
+
