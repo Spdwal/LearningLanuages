@@ -521,3 +521,111 @@ if(!s.empty()){
       }
   };
   ```
+
+##### 不同域中互斥量所有权的传递
+
+std::unique_lock是一个可以移动，不可以赋值的类型。
+
+一种使用方式是允许一个函数去锁住一个互斥量，然后把这个互斥量作为返回值返回给调用它的函数，然后调用者可以在这个锁保护的范围内执行其他的动作。
+
+```c++
+std::unique_lock<std::mutex> get_lock(){
+    extern std::mutex some_mutex;
+    std::unique_lock<std::mutex> lk(some_mutex);
+    prepare_data();
+    return lk;
+}
+
+void process_data(){
+    std::unique_lock<std::mutex> lk(get_lock());
+    do_something();
+}
+```
+
+但是正常情况下，并不会直接使用返回unique_lock这么粗暴的做法。而是使用RAII，来将锁和数据封装起来，因为wapper类是会在函数之间作为参数传递的，所以同时锁也应该要能移动。
+
+unique_lock同时也可以提前通过调用unlock()来提前释放锁，这表示我们可以在程序类已经不需要锁的地方提前释放锁，避免性能损失。
+
+##### 锁的粒度
+
+粒度用来描述一个锁保护的数据量大小，一个细粒度锁能够保护较小的数据，一个粗粒度锁可以保护较多的数据。
+
+如果很多线程正在等待同一个资源，当有线程持有锁的时间过长，就会增加等待的时间。在可能的情况下，锁住互斥量的同时只能对共享数据进行访问。在维持锁的粒度上，unique_lock非常好用。
+
+```c++
+void get_and_process_data(){
+    std::unique_lock<std::mutex> my_lock(the_mutex);
+    some_class data_to_process=get_next_data_chunk();
+    my_lock.unlock();
+    result_type result = process(data_to_process);
+    my_lock.lock();
+    wirte_result(data_to_process, result);
+}
+```
+
+锁不仅是能锁住合适粒度的数据，还要控制锁的持有时间，以及什么操作在执行的同时可以控制持有锁的时间，以及什么操作在执行的同时可以持有锁。__一般情况下将锁的持有时间所见到最小。__
+
+## 保护共享数据结构的替代设施
+
+互斥量并不是保护共享数据的唯一方式。有一种比较极端的情况就是：共享数据在并发访问和初始化时候需要保护，但是之后需要进行隐式同步。
+
+###### 保护共享数据的初始化过程
+
+使用一个互斥量的延迟初始化过程
+
+```c++
+std::shared_ptr<some_resource> resource_ptr;
+std::mutex resource_mutex;
+void foo(){
+    std::unique_lock<std::mutex> lk(reource_mutex);
+    if(!resource_ptr){
+        resource_ptr.reset(new some_resource);
+    }
+    lk.unlock();
+    resource_ptr->do_something();
+}
+```
+
+双重检查锁模式
+
+```c++
+void undefined_behaviour_with_double_checked_locking(){
+    if(!resource_ptr){
+        std::lock_guard<std::mutex> lk(resource_mutex);
+        if(!resource_ptr){
+            resource_ptr.reset(new some_resource);
+        }
+    }
+    
+    resource_ptr->do_something();
+}
+```
+
+以上模式存在有潜在的条件竞争，在第一次检查resource_ptr之后，若另一个线程调用resource_ptr.reset(),虽然此时该共享指针已经不是指向NULL，但是他所构建的实例却可能还没有完全构建出来，但是第一个if语句却直接跳到了do_something()函数处，得到了UB。
+
+这个例子就是一个典型的条件竞争--------数据竞争。C++标准库提供了std::once_flag和std::call_once来处理这种情况。每个线程只要调用std::call_once，在std::call_once结束的时候，就能安全的知道指针已经被其他线程初始化了。使用std::call_once比显式使用互斥量消耗的资源更少，特别是当初始化完成之后。
+
+```
+std::shared_ptr<some_resource> resource_ptr;
+std::once_flag resource_flag;
+
+void init_resource(){
+    resource_ptr.reset(new some_resource);
+}
+
+void foo(){
+    std::call_once(resource_flag, init_resource);
+    
+    resource_ptr->do_something();
+}
+```
+
+当一个局部变量被声明成static类型。这种变量在声明后已经完成了初始化，对于多线程调用的函数，这意味着这里有条件竞争，每个线程都抢着去定义这个变量，但是在c++11标准中，初始化和定义完全在一个线程中进行，没有其他线程可以对其进行处理。
+
+###### 保护很少更新的数据结构
+
+针对读写者问题，需要一种不同的互斥量：允许两种不同的使用方式。
+
+std::mutex已经在c++17中支持，环境clang++ 10.0。
+
+当一个线程获得一个已经上锁的mutex，并对其再次上锁，这个操作是错误的。但是标准库提供了std::recursive_mutex，它可以在同一个线程内多次上锁，但是允许其他线程访问的时候，必须释放所有的锁。
