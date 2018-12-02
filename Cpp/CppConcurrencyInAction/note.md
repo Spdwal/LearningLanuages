@@ -720,3 +720,368 @@ do_something();
 
 上述代码可以很好的防止虚假唤醒，因为在获取锁之后，如果cond被修改，它又进入while循环，然后进入等待状态，释放自己的锁。
 
+## 使用future等待一次性事件
+
+C++标准库将一次性事件称为期望，当一个线程需要等待一个特性的一次性事件的时候，在某种程度上，它就需要知道这个事件在未来表现的形式。之后，这个线程会周期性的等待或者检查，事件是否触发，在执行期间它也会执行其他任务，知道对应的任务出发，而后等待期望的状态就会变成就绪。
+
+在C++标准库中，有两种期望：future和shared_future。std::future的实例只能和一个指定事件相关联，而shared_ptr可以关联多个事件。在后者的实现中，所有实例会在同时变为就绪状态，并且它们可以访问与事件相关的任何数据。期望对象本身并不提供同步访问。当多个线程需要访问一个独立期望对象时候，它们必须使用互斥量或者类似的同步机制对访问进行保护。
+
+```c++
+#include<future>
+#include<iostream>
+int find_the_answer_to_ltuae();
+void do_other_stuff();
+
+int main(){
+    std::future<int>the_answer = std::async(find_the_answer_to_ltuae);
+    do_other_stuff();
+    std::cout << "The answer is " << the_answer.get() << std::endl;
+}
+```
+
+与thread做的一样，std::async允许通过添加额外的参数。
+
+期望是否进行等待取决于std::async是否启动一个线程，或者是否有任务正在进行同步，但是也可以向std::async传递一个参数std::launch，还可以是std::launch::defered，用来表明函数调用被要吃到wait()和get()调用才执行。
+
+sstd::launch::async表明函数必须在其所在的独立线程上执行，std::launch::deferred | std::launch::async表明可以选择这两种方式的一种。
+
+```c++
+auto f6=std::async(std::launch::asny, Y(), 1.2);            //在新线程中执行
+auto f7=std::async(std::launch::defered, baz,std::ref(x));  //在wait()或者get()调用时候执行。
+auto f8=std::async(std::launch::defered | std::launch::async,
+                  baz, std::ref(x));                        //到底何时运行依赖函数的实现
+auto f9=std::async(baz, std::ref(x));
+f7.wait();                                                  //调用defered类型的事件。
+```
+
+std::packaged_task把一个期望绑定在一个函数或者一个仿函数上，当packaged__task对象被调用，他调用自己绑定的函数或者仿函数，将期望状态设置为就绪，然后返回数据。这个技术可以用在线程池上。
+
+当一个粒度较大的操作可以被分解成独立的子任务时候，每个子任务可以包含在一个std::packaged_task中实例中，之后这个实例将会传递到任务调度器或者线程池中。
+
+Packaged_task<>的模版参数是一个函数签名，比如std::packaged_task<double(double)>即是接受一个返回值为double，参数为一个double的函数。且里面的类型可以进行隐式转换。
+
+当packaged_task作为一个函数被调用的时候，可谓函数调用操作符提供所需的参数，并且将返回值作为异步结果存储在std::future中，可通过get_future()来获得它。当需要异步任务的返回值时候，可以将期望的状态改为就绪。
+
+###### 使用std::promise
+
+Std::promise提供了提供给future一个值或者是一个异常的途径，std::promise只能被使用一次。
+
+promise和future组成了一个机制，在期望上可以阻塞等待线程，同时，提供数据的线程可以使用组合中的承诺来对相关值进行设置，以及将期望的值设置为就绪。当promise的值以及设置完毕，那么对应期望的值的状态变为就绪，并且可以用于检索已存储的值。
+
+```c++
+#include<future>
+
+void process_connections(connection_set& connections)
+{
+    //连接全部完成则退出。
+    while(!done(connections)){
+        //依次检验每一个链接，
+        for(connection_iterator connection = connections.begin(), end = connections.end();
+           connection != end;
+            ++connection){
+            //是否有数据传入
+            if(connection->has_incoming_data()){
+                //获得数据
+                data_packet data = connection->incoming();
+                //此处假设一个数据有一个ID，有一个负载。
+                //一个id映射到一个promise。
+                //设置result为data.payload
+                std::promise<payload_type>& p = 
+                    connection->get_promise(data.id);
+                p.set_value(data.payload);
+            }
+            //发送已经出队的传出数据
+            if(connection0>has_outgoing_data()){
+                outgoing_packet data=
+                    connection->top_of_outgoing_queue();
+                connection->send(data.payload);
+                //将承诺设置为true，来表示传出成功。
+                data.promise.set_value(true);
+			}
+        }
+    }
+}
+```
+
+###### 将期望存储为异常
+
+```
+std::future<double> f = std::async(square_root, -1);
+double y = f.get();
+```
+
+在任何情况下，y获得函数调用的结果，当线程调用f.get()的时候，就能再看到异常了，即使在一个单线程例子中。函数作为std::async的一部分时，当在调用时抛出一个异常，那么这个异常就会存储到“期望”的结果中，之后期望的状态被设置为就绪，之后调用get()会抛出这个存储的异常。当函数打包进入std::packaged_task中时，当这个任务被调用时，同样的事情也会发生。
+
+通过对函数的显示调用，promise也提供同样的功能，但是当希望存入的是一个异常的时候，就需要时set_excetion()成员函数，而不是set_value()。
+
+```c++
+extern std::promise<double> some_promise;
+try{
+    some_promise.set_value(calculate_value());
+}catch(...){
+    some_promise.set_exception(std::current_exception());
+}
+```
+
+这里使用了std::current_exception()来检索抛出的异常。可以用std::copy_exception()来存储一个异常，而不抛出它。
+
+```c++
+some_promise.set_excetion(std::copy_exception(std::logic_error("foo )));
+```
+
+到现在为止我们都在使用std::future，但是在很多线程在等待的时候，只有一个线程能获取等待结果，当多个线程需要等待相同的时间的结果，就需要使用std::shared_future来代替std::future了。
+
+###### 多个线程的等待
+
+Shared_future是可拷贝的，所以多个对象可以引用同一个关联期望的结果。
+
+在每一个std::shared_future的独立对象上，成员函数调用返回的结果还是不同步的，所以为了在多个线程访问一个独立对象的时候，为了避免数据竞争，不许使用锁来对访问进行保护。为了替代只有一个拷贝的情况，可以让每个线程都拥有自己对应的拷贝对象。这样，当每个线程都通过自己拥有的std::shartd_future对象获取结果，那么多个线程访问共享同步的结果就是安全的。
+
+转移所有权是对右值的隐式操作，所以可以通过对promise对象的成员函数get_future()的返回值，直接构造一个std::shared_future对象。
+
+```c++
+std::promise<std::string> p;
+std::shared_future<std::string> sf(p.get_future());
+```
+
+同时std::future还存在有std::future::share方法，可以将期望转换成shared_future，直接转移期望的所有权。
+
+## 限定等待时间
+
+超时方式有两种：一种是指定时间延迟，一种是指定一个时间点。
+
+### 时钟
+
+时钟的当前时间可以用过调用静态成员函数now()从时钟中获取：std::chrono::system_clock::now()；
+
+但是这个时钟依赖于系统时间，所以是不稳定的，标准库还提供了一个稳定时钟：std::chrono::steady_clock；
+
+std::chrono::high_resolution_clock可能是标准库中提供的具有最小节拍周期的时钟，同时也是具有最高分辨率的时钟。
+
+### 时延
+
+时延是时间部分最简单的，std::chrono::duration<>模版函数能够对时延进行处理。第一个参数是一个类型表示：int, double等，第二个参数是指定部分，表示每一个单元用的秒数。例如几分钟的时间可以写成：
+
+```c++
+std::chrono::duration<short, std::ratio<60, 1>>     //60秒为1分钟
+```
+
+标准库在命名空间内为延时变量提供一系列预定义类型：nanoseconds, microseconds, milliseconds, seconds, minutes, hours等等。
+
+在不要求截断的情况下，时延的转换是隐式的。显示转化可以由std::chrono::duration_cast<>来完成。
+
+```c++
+std::chrono::milliseconds ms(54802);
+std::chrono::seconds s = std::chrono::duration_cast<std::chrono::seconds>(ms);
+```
+
+这样结果就是截断的，而不是进行了舍入。
+
+延时支持计算，所以可以对两个延时量进行加减，或是对一个延时变量乘除一个常数，来获得一个新延迟变量。在时延中可以用过count成员函数获得单位时间的数量。
+
+```c++
+std::chrono::milliseconds(1234).count();         //1234
+```
+
+基于时延的等待可以由std::chrono::duration<>来完成。
+
+```c++
+std::future<int> f = std::async(some_task);
+if(f.wait_for(std::chrono::milliseconds(35)) == std::future_status::ready){
+    do_something_with(f.get());
+}
+```
+
+等待函数会返回一个状态值，来表示等待是超时，还是继续等待。在这种情况下，可以等待一个期望，所以当函数等待超时时，会返回std::future_status::timeout，当期望改变，函数会返回std::future_status::readty，当期望任务延迟了，函数会返回std::future_status::deferred。
+
+### 时间点
+
+时钟的时间点可以用std::chrono::time_point<>的类型模版实例来表示，实例的第一个参数用来制定所要使用的时钟，第二个参数表示时间的计量单位(std::chrono::duration<>)。一个时间点的值就是时间的长度。
+
+时间戳是时钟的一个基本属性，但是不可以直接查询，或者在c++标准中已经指定。
+
+```c++
+auto start = std::chrono::high_resolution_clock::now();
+do_something();
+auto stop = std::chrono::high_resolution_clock::now();
+std::cout << "do_something() took " << std::chrono::duration<double, std::chrono::seconds>(stop-start).count() << " seconds" << std::endl;
+```
+
+Std::chrono::time_point()实例的时钟参数可不仅是能够指定UNIX时间戳的。
+
+```c++
+#include<condition_variable>
+#include<mutex>
+#include<chrono>
+
+std::condition_variable cv;
+bool done;
+std::mutex m;
+
+bool wait_loop(){
+    //获取一个时间点。
+    auto const timeout=std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    std::unique_lock<std::mutex> lk(m);
+    while(!done){
+       	//等待到这个时间点
+        if(cv.wait_until(lk, timeout) == std::cv_status::timeout)
+            break;
+    }
+    return done;
+}
+```
+
+### 具有超时功能的函数
+
+对一个特定线程添加一个延迟处理。当这个线程无所事事的时候，就不会占用其他线程的处理时间。这两个处理函数分别是std::this_thread::sleep_for和std::this_thread::sleep_until();
+
+当线程因为指定时延进入睡眠时，可以通过sleep_for()进行唤醒，或者因指定时间点睡眠的，可以使用sleep_until唤醒。超时可以配合条件变脸和期望一起使用。超时甚至可以在尝试获取一个互斥锁时使用。std::mutex和std::recursive_mutex都不支持超时锁，但是std::timed_mutex和std::recurseive_timed_mutex支持。这两种类型也有try_lock_for()和try_lock_until()成员函数存在，可以在一段时间内尝试，或者在指定时间点前获取互斥锁。
+
+## 使用同步操作简化代码
+
+### 使用期望的函数式编程
+
+#### 快速排序FP模式版本
+
+```c++
+template<typename T>
+std::list<T> sequential_quick_sort(std::list<T> input){
+    if(input.empty()){
+        return input;
+    }
+    std::list<T> result;
+    result.splice(result.begin(), input, input.begin());
+    //将第一个值作为锚点
+    T const& pivot = *result.begin();
+    auto devide_point = std::partition(input.begin(),input.end(),[&](T const& t)[return t < pivot;]);
+    
+    std::list<T> lower_part;
+    lower_part.splice(lower_part.end(), input, input.begin(), devide_point);
+    auto new_lower(sequential_quick_sort(std::move(lower_part)));
+    auto new_higher(sequential_quick_sort(std::move(input)));
+    
+    result.splice(result.end(), new_higher);
+    result.splice(result.begin(), new_lower);
+    return result;
+}
+```
+
+。。。。。裤子都脱了就给我看了个这个。这个快速排序唯一不同的一点就是把lower和higher这两个链表给存储起来，然后通过splice进行拼接。
+
+#### 快速排序线程强化版
+
+```c++
+template<typename T>
+std::list<T> parallal_quick_sort(std::list<T> input){
+    if(input.empty()){
+        return input;
+    }
+    
+    std::list<T> result;
+    result.splice(result.begin(), input, input.begin());
+    T const& pivot = *result.begin();
+    auto divide_point = std::partition(input.begin() input, input.end(),
+                                      [&](T const& t){return t < pivot;});
+    
+    std::list<T> lower_part;
+    lower_part.splice(lower_part.end(), input, input.begin(),
+                     divide_point);
+    //此处代码的parallel_quick_sort之前可加&也可不加&，不知道为何
+    std::future<std::list<T>> new_lower(std::async(parallel_quick_sort<T>, std::move(lower_part)));
+    auto new_higher(parallel_quick_sort(std::move(input)));
+    
+    reslut.splice(result.end(), new_higher);
+    reslut.splice(result.begin(), new_lower.get());
+    return result;
+}
+```
+
+asny会启动一个新线程，这样当递归三次时候，就有8个线程在运行，当递归十次的时候，会有1024个线程在运行。
+
+比起使用asd::async()，你可以写一个spawn_task函数对std::packaged_task和std::thread进行简单的包装：
+
+```c++
+template<typename F, typename A>
+std::future<std::result_of<F(A&&)>::type>
+spawn_task(F&& f, A&& a){
+	using std::result_of<F(A&&)>::type = result_type;
+	std::packaged_task<result)type(A&&)> task(std::move(task(f)));
+	std::future<result_type> res(task.get_future());
+	std::thread t(std::move(task), std::move(a));
+	t.detack();
+	return res;
+}
+```
+
+因为避开了共享易变数据，函数化编程可算是并发编程的典范，并且也是通讯顺序进程的范型。这里的线程理论上是完全分开的，也就是没有共享数据，但是有通讯通道允许信息再不同的线程内进行传递。
+
+### 使用消息传递的同步操作
+
+CSP的概念十分简单：当没有共享数据，每个线程就可以独立进行思考，其行为纯粹基于其所收到的信息。每个线程都有一个状态机：当线程收到一条信息，它将会以某种方式更新其状态，并且可能向其他线程发出一条或者多条信息，对于消息的处理依赖于线程的初始化状态。
+
+无论你选择用什么方式去实现每个线程，任务都会分成独立的处理部分，这样会消除潜在的混乱，这样编程就会变得更加简单，且有更高的容错率。
+
+真正的通讯顺序处理是没有共享数据的，所有的消息都是通过消息队列传递，但是因为c++线程共享一块地址 空间，所以达不到真正通讯处理的要求。所以我们有责任确保在我们的实现中，线程不存在共享数据。当然为了线程间的通信，消息队列是必须要共享的。
+
+一个ATM逻辑类的简单实现
+
+```c++
+struct card_inserted{
+    std::string account;
+}
+
+class atm{
+    messaging::receiver incoming;
+    messaging::sender bank;
+    messaging::sender interface_hardware;
+    
+    void (atm::*state)();
+    
+    std::string account;
+    std::string pin;
+    
+    void waiting_for_card(){
+        interface_hardware.send(display_enter_card());
+        incoming.wait().handle<card_inserted>(
+      	  [&](card_inserted const& msg){
+       	     account=msg.account;
+       	     pin="";
+  			 interface_hardware.send(display_enter_pin());
+             state=&atm::getting_pin;
+          });
+    }
+    
+    void getting_pin(){
+        //wait等待三种信号，并对它们进行处理
+        incoming.wait()
+            .handle<digit_pressed>([&](digit_pressed const& msg){
+                unsigned const pin_length=4;
+                pin+=msg.digit;
+                if(pin.length()==pin_length){
+                    bank.send(verify_pin(account, pin, incoming));
+                    state = &atm::verifying_pin;
+                }
+            })
+            .handle<chear_last_pressed>([&](clear_last_pressed const& msg){
+                if(!pin.empty()){
+                    pin.resize(pin.length() - 1);
+                }
+            })
+            .handle<cancel_pressed>([&](cancel_pressed const& msg){
+                state=&atm::done_processing;
+            });
+    }
+public:
+    void run(){
+        state = &atm::waiting_for_card;
+        try{
+            for(;;){
+                (this->*state)();
+            }
+        }catch(messaging::close_queue const&){
+            
+        }
+    }
+};
+```
+
