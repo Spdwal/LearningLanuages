@@ -1085,3 +1085,272 @@ public:
 };
 ```
 
+# C++内存模型和原子类型操作
+
+## 内存模型基础
+
+在C++程序中所有的数据都是由对象构成。无论对象是怎么样的一个类型，一个对象都会存储在一个或者多个内存为止上。每一个内存位置不是一个标量类型的对象，就是一个标量的子对象。
+
+完成的struct是一个有多个子对象组成的对象组成的对象。在C++和c中规定，宽度为0的一个未命名位域，强制下一位域对齐到下一type边界。其中type是该成员的类型。
+
+有四个需要牢记的原则：
+
++ 每一个变量都是一个对象，包括作为其成员变量的对象。
++ 每个对象至少占有一个内存位置。
++ 基本类型都有确定的内存位置。
++ 相邻位域是相同内存的一部分。
+
+### 对象，内存位置和并发
+
+所有东西都在内存中，当两个线程访问不同的内存位置时，不会存在任何问题，而另一种情况下，当两个线程访问同一个内存位置时，如果没有线程更新内存位置上的数据还好，当有线程对内存位置上的数据进行修改，就有可能发生条件竞争。
+
+为了避免条件竞争，两个线程就需要一定的执行顺序：
+
++ 使用互斥量来确定访问顺序。
++ 可以使用原子操作来避免未定义行为，这不会影响竞争的产生，原子操作并没有指定访问顺序，但是原子操作吧程序拉回了定义行为的区域内。
+
+### 修改顺序
+
+在每一个c++对象中，都有确定好的修改顺序，在大多数情况下，这个顺序不同于执行中的顺序，但是在给定的执行程序中，所有线程都要遵守这个顺序。如果对象不是一个原子类型，则必须要确保有足够的同步操作来确定每个线程都遵守了变量的修改顺序。如果使用原子操作，编译器就有责任去替你做必要的同步。
+
+## 原子操作和原子类型
+
+原子操作是一个不可分割的操作，在系统的所有线程中，是不可能观察到原子操作完成了一半这种情况，它要不是做了，要不就是没做。只有这两种可能。
+
+### 标准原子类型
+
+标准原子类型定义在头文\<atomic\>中。这些类型上所有的操作都是原子的，在语言定义上，只有这些类型的操作是原子的，不过可以使用互斥锁来模拟原子操作。实际上标准原子类型自己的实现几乎就是这样模拟出来的。它们几乎都有一个is_lock_free()成员函数，这个函数让用户可以查询某原子类型的操作是直接用的原子指令(x.is_lock_free()返回true)，还是编译器和库内部使用了一个锁(x.is_lock_free()返回false)。
+
+std::atom_flag类型不提供is_lock_free()成员函数。这个类型是一个简单的布尔标志，并且在这种类型上的操作都需要是无锁的。
+
+剩下的原子操作都可以通过特化std::atomic<>类型模版而访问到，并且拥有更多的功能，但是可能不都是无锁的。
+
+出了直接使用std::atom<>类型模版外，还可以使用模版下表的原子类型集，它们已经加入c++标准中了。
+
+|    原子类型     |           相关特化类            |
+| :-------------: | :-----------------------------: |
+|   atomic_bool   |       std::atomic\<bool>        |
+|   atomic_char   |       std::atomic<char\>        |
+|  atomic_schar   |    std::atomic<signed char\>    |
+|  atomic_uchar   |   std::atomic\<unsigned char>   |
+|   atomic_int    |        std::atomic\<int>        |
+|  atiomic_uint   |     std::atomic\<unsigned>      |
+|  atomic_short   |       std::atomic\<short>       |
+|  atomic_ushort  |  std::atomic\<unsigned short\>  |
+|   atomic_long   |       std::atomic\<long>        |
+|  atomic_ulong   |   std::atomic<unsigned long\>   |
+|  atomic_llong   |     std::atomic<long long\>     |
+|  atomic_ullong  | std::atomic<unigned long long\> |
+| atomic_char16_t |      std::atomic<char16_t>      |
+| atomic_char32_t |      std::atomic<char32_t>      |
+| atomic_wchar_t  |      std::atomic\<wchar_t>      |
+
+c++标准库不仅提供基本原子类型，还定义了与非原子类型对应的非原子类型。它们有一个相当简单的模式，对于标准类型进行typedef T，相关的原子类型就在原来的类型名上加上atomic_的前缀:atomic_t。除了signed类型的缩写是s，unsigned的缩写是u，longlong的缩写是llong之外，这种方式也同样适用与内置类型。
+
+通常，标准原子类型是不能拷贝和赋值的，但是可以隐式转换成对应的内置类型。所以这些类型依旧支持赋值，可以使用load()和store()成员函数，exchange()，compare_exchange_weak()和compare_exchange_strong()。它们都支持符合赋值符：+=，-=，*=，|=等等。并且使用整型和指针的特化类型还支持++,--。当然这些操作也有功能相同的成员 函数所对应。
+
+### std::atomic_flag的相关操作
+
+std::atomic_flag类型的对象必须被ATOMIC_FLAG_INIT初始化。初始化的标识位为“清除状态”。
+
+```c++
+std::atomic_flag f=ATOMIC_FLAG_INIT；
+```
+
+它是唯一需要如此特殊方式初始化的原子类型。当你的标志对象已经初始化，那么就只能做三件事：
+
+销毁，清除或者设置。分别对应clear()和test_and_set()成员函数。clear()和test_and_set()成员函数是可以指定好内存顺序，clear()是一个存储操作。test_and_set()是一个“读，改，写”操作，所以可以应用于任何内存顺序标签。每一个原子操作，默认的内存顺序都是memory_order_seq_cst。
+
+不能拷贝构造另一个std::atomic_flag对象，并且不能将一个对象赋予另一个std::atomic_flag对象。
+
+有限的特性使std::atomic_flag非常适合与自旋互斥锁。
+
+```c++
+class spinlock_mutex{
+    std::atomic_flag flag;
+public:
+    spinlock_mutex():flag(ATOMIC_FLAG_INIT){}
+    
+    void lock(){
+        //将标识位设为true，然后返回之前的标识位
+        while(flag.test_and_set(std::memory_order_acquire));
+    }
+    
+    void unlock(){
+        //将falg设置为false，内存模型定为std::memory_order_release.
+        flag.clear(std::memory_order_release);
+    }
+}
+
+```
+
+由于std::atomic_flag局限性太强，因为它没有非修改查询操作，甚至不能像普通的布尔标志那样使用。
+
+### std::atomic的相关操作
+
+最基本的原子整型就是std::atomic<bool\>，虽然它依然不能拷贝构造或者拷贝赋值，但是它可以被一个bool变量赋值。
+
+```c++
+std::atomic<bool> b(true);
+b = false;
+```
+
+store()是一个存储操作，load()是一个加载操作，exchange()是一个读写改操作。
+
+```c++
+std::atomic<bool> b;
+bool x = b.load(std::memory_order_acquire);
+b.store(true);
+x = b.exchange(false, std::memory_order_acq_rel);
+```
+
+有一种新型操作，叫做“比较/交换”，它的形式表现为"compare_exchange_weak()"和"compare_exchange_strong()"。它比较原子变量的当前值和一个期望值，当两值相等时，存储提供值。当两值不等，期望值会被更新为原子变量中的值。对于compare_exchange_weak()函数，当原始值和期望值一致时候，存储也可能会不成功，并且compare_exchange_weak的返回值是false；当处理器不能保证这个操作能够自动的完成————可能使因为线程的操作将指令队列从中间关闭，并且另一个线程安排的指令将会被操作系统所替换(这里线程数量多于处理器数量)。这被称为伪失败，因为造成这种原因的是时间而不是变量值。应该尽量使用compare_exchange_strong()函数，但是使用compare_exchange_weak()可以带来更好的性能。通常可以用以下做法避免伪失败：
+
+```c++
+bool expected = false;
+extern atomic<bool> b;
+while(!b.compare_exchange_weark(expected, true) && !expected);
+```
+
+第一个参数为与原子变量内部比较的值，第二个参数是要给原子变量进行修改的值。如果原子变量被修改，则返回true，否则返回false。
+
+如果值的存储本身是耗时的，那么当期望值不变的时候，使用compare_exchange_strong()可以避免对值的重新计算。
+
+比较/交换函数很少对两个拥有内存顺序的参数进行操作。这就允许内存顺序语意在成功和失败的例子中有所不同，其可能是对memory_order_acq_rel语义的一次成功调用，而对memory_order_relaxed语义的一次失败调用。一次失败的比较/交换操作不会进行存储，所以比较操作不能拥有memeory_order_release或者memory_order_acq_rel语义。
+
+下面对compare_exchange_weak()的两次调用都是等价的：
+
+```c++
+std::atmoc<bool> b;
+bool expected;
+b.compare_exchange_weak(expected, true, memory_order_acq_rel, memory_order_acquire);
+b.compare_exchange_weak(expected, true, memory_order_acq_rel);
+```
+
+std::atomic<bool\>和std::atomic_flag的不同之处在于，std::atomic<bool\>不是无锁的，为了保证操作的原子性，其实现中需要一个内置的互斥量。
+
+### std::atomic::ptr
+
+原子指针类型，可以通过特化std::atomic<T*>进行定义，就如同使用bool类型定义std::atomic\<bool>类型一样，虽然他们的接口几乎一致，但是他的操作是对于相关类型的指针，而非bool值本身。
+
+std::atomic<T*\>为指针运算提供新的操作。基本操作有fetch_add()和fetch_sub()提供。但是它们的返回值和正常的运算略有不同。例如__x.fetch_add(3)让x指向第四个元素，但是它返回指向第一个元素的地址。__
+
+这种操作也被称为“交换-相加”，并且这是一个原子的“读-改-写”操作。
+
+```c++
+class Foo{};
+Foo some_array[5];
+std::atomic<Foo*> p(some_array);          // some_arr[0]
+Foo* x = p.fetch_add(2);                  // x = some_arr[0], p = some_arr[2]
+assert(x == some_array);                  // true
+assert(p.load() == &some_array[2]);       // 获取p的值，true
+x = (p-=1);                               // x = some_arr[2], p == some_arr[1]
+assert(x == &some_array[1]);              // false
+assert(p.load() == &some_array[1]);       // true
+```
+
+因为没有办法提供必要的信息，这些形式都具有memory_order_seq_cst语义。
+
+### std::atomic<>主要类的模版
+
+主模版的存在，在除了标准原子类型之外，允许用户使用自定义类型创建一个原子变量。但是不是任何自定义变量都可以使用std::atomic<>的，需要满足一定的标准才行。为了使用std::atomic<UDT\>，这个类型必须有拷贝赋值运算符。这就意味着这个类型不能有任何虚函数和虚基类，以及必须使用编译器创建的拷贝赋值运算符。自定义类型中所有的基类和非静态成员也需要支持拷贝赋值操作，这基本上就允许编译器使用memcpy()，或赋值操作的等价操作，因为它们的实现中没有用户代码。最后，这个类型必须是“bitwise equality comparable"的。一个UDT对象可以使用memcpy()进行拷贝，还要确定其对象可以使用memcmp()对位进行比较。
+
+以上严格的限制都是依据第三章的一个建议：不要将锁定区域内的数据，以引用或者指针的形式，作为参数传递给用户提供的函数。通常情况下，编译器不会位std::atomic<UDT\>类型生成无锁代码，所以它将对所有操作使用一个内部锁。如果用户提供的拷贝赋值或者比较操作被允许，那么就需要传递保护数据的引用作为一个参数。
+
+注意，虽然使用std::atomic<float\>和std::atomic<double\>，但是它们在compare_exchange_strong函数中单存储的值与当前的值相同，这个操作也可能失败，这是因为浮点数的不精确性所致。如果使用std::atomic<>特化了一个用户自定义类型，并且这个类型定义了比较操作，而这比较操作由与memcpy不同，操作可能会失败，因为两个相等的值有不同的表达式。
+
+当使用用户自定义类型T进行实例化的时候，std::atomic<T\>的可用接口就只有load，store，exchange，compare_exchange_weak，compare_exchange_strong和赋值操作，以及向类型T的转换的操作。
+
+### 原子操作的释放函数
+
+原子对象被成员函数隐式引用，所有释放函数都持有一个指向原子对象的指针。例如std::atom_is_lock_free(&a)的返回值与a.atom_is_lock_free()相同。需要注意的是：与a.load(std::memory_order_acquire)等价的操作是std::atom_loac_explicit(&a, std::memory_order_acquire);
+
+释放函数的设计是为了与c语言兼容，在c中只能使用指针，而不能使用引用。
+
+对std::atomic_flag的操作是反潮流的，在那些操作中它们标志的名称为：std::atomic_flag_test_and_set()和std::atomic_flag_clear()。
+
+C++标准库也对在一个原子类型中的std::shared_ptr智能指针类型提供释放函数。
+
+```
+std::shared_ptr<my_data> p;
+void process_global_data(){
+    std::shared_ptr<my_data> local = std::atomic_load(&p);
+    process_data(local);
+}
+
+void update_global_data(){
+    std::shared_ptr<my_data> local(new my_data);
+    std::atomic_store(&p, local);
+}
+```
+
+## 同步操作和强制排序
+
+假如有两个线程，一个向数据结构内填充数据，另一个读取数据结构中的数据。为了避免恶性条件竞争，第一个线程设置一个标志，用来表明数据已经准备就绪，并且第二个线程在这个标志设置前不能读取数据。
+
+```c++
+#include<vector>
+#include<atomic>
+#include<iostream>
+
+std::vector<int> data;
+std::atomic<bool> data_ready(false);
+
+void reader_thread(){
+    while(!data_ready.load()){
+        std::this_thread::sleep(std::milliseconds(1));
+    }
+    std::cout << "The answer="<<data[0] <<"\n";
+}
+
+void writer_thread(){
+    data.push_back(42);
+    data_ready = true;
+}
+```
+
+当非原子读和写对同一数据结构进行无序访问时，将会导致未定义行为的发生，因此这个循环就是确保访问循序被严格的遵守的。
+
+强制访问顺序是由对std::atomic<bool\>类型的data_ready变量进行操作完成的。这些操作通过先行发生和同步发生确定必要的顺序。
+
+### 同步发生
+
+同步发生只能在原子类型之间操作。例如对一个数据结构进行操作，如果数据结构包含有原子类型，并且操作内部进行了一定的原子操作，那么这些操作就是同步发生关系。同步发生的基本想法是：在变量x进行适当标记的原子写操作w，同步与对x进行适当标记的原子读操作，读取的是w操作写入的内容，或是在w之后，同一线程的原子写操作对x写入的值。或者是任意线程对x的一系列读-改-写擦欧总。
+
+### 先行发生
+
+关系是一个程序中，基本构建快的操作顺序，它指定了某个操作去影响另一个操作。如果操作A在线程上，并且线程先行与另一线程上的操作B，那么A就先行于B。线程间的先行比较简单，并且依赖于同步关系。这同样是一个传递关系，如果A线程间先行于B，并且B线程间先行于C，那么A就线程间先行于C。
+
+如果A同步于B，切B排序先于C，那么A线程间先行于C。
+
+### 原子操作的内存顺序
+
+一共有6个内存序列选项可应用于对原子类型的操作。memory_order_relaxed，memory_order_consume，memory_order_acquire，memory_order_release，memory_order_acq_rel，memory_order_seq_cst。
+
+虽然有6种序列，但是它们仅仅代表3种内存模型：
+
++ 排序一致序列
++ 获取-释放序列
++ 自由序列
+
+这些不同的内存模型，在不同的CPU下，功耗是不一样的。不同种类的内存序列模型，允许专家利用其提升于更细粒度排序相关操作的性能。
+
+##### 排序一致序列
+
+默认排序命名为排序一致，是因为程序中的行为从任务角度去看，序列顺序都保持一致。如果原子类型实例上的所有操作都是序列一致的，那么一个多线程程序的行为，就以某种特殊的排序执行，好想单线程那样。
+
+从同步的角度去看，对于同一变量，排序一致的存储操作同步项关于同步一致的载入操作。这就提供了一种对两个以上线程操作的排序约束，但是排序一致的功能要比排序一致大的多。所以对使用排序一致原子操作系统上的任意排序一致的原子操作，都会在对值进行存储后，再进行加载。
+
+在一个多核排序的的基础上，他就会加强对性能的惩罚，因为整个序列中的操作都必须在多个处理器上保持一致，可能需要对处理器见的同步操作进行扩展。
+
+序列一致时最简单最直观的序列，但是它也是最昂贵的内存序列，因为它需要对所有线程进行全局同步，在一个多处理系统上，这就需要处理期间进行大量并且费时的信息交换。
+
+##### 非排序一致性内存模型
+
+不同的线程看到相同的操作，不一定有着相同的顺序。即使线程运行相同的代码，它们都能拒绝遵循时间发生的顺序，因为操作在其他线程上没有明确的顺序限制，
+
+##### 自由序列
+
+在原子类型上的操作以自由序列执行，没有任何同步关系。在同一线程人中对于同一变量的操作还是服从于先发执行的关系，但是不同线程几乎不需要相对的顺序。唯一的要求是在访问同一线程中的单个原子变量不能重新排序。
+
+非限制操作对于不同的变量可以自由重排序，只要它们服从于任意的先发执行关系即可。它们不会引入同步相关的顺序。
