@@ -1351,6 +1351,306 @@ void writer_thread(){
 
 ##### 自由序列
 
-在原子类型上的操作以自由序列执行，没有任何同步关系。在同一线程人中对于同一变量的操作还是服从于先发执行的关系，但是不同线程几乎不需要相对的顺序。唯一的要求是在访问同一线程中的单个原子变量不能重新排序。
+在原子类型上的操作以自由序列执行，没有任何同步关系。__在同一线程上中对于同一变量的操作还是服从于先发执行的关系，但是不同线程几乎不需要相对的顺序。__唯一的要求是在访问同一线程中的单个原子变量不能重新排序。
 
 非限制操作对于不同的变量可以自由重排序，只要它们服从于任意的先发执行关系即可。它们不会引入同步相关的顺序。
+
+x86不支持relax序列。
+
+##### 释放-获取序列
+
+虽然操作依旧没有统一的顺序，但是在这个序列引入了同步。在这种序列模型中，原子加载就是获取操作(memory_order_acquire)，原子存储就是释放操作(memory_order_release)操作。原子读-写-改操作在这里，不是获取，就是释放，或者两者兼有(memory_order_acq_rel)。这里，同步在线程释放和获取间是成对的。
+
+# 他妈的写的是个啥，看不懂！！！！！
+
+# 基于锁的并发数据结构设计
+
+## 作为并发设计的意义何在
+
+线程对这个数据结构做相同或者不同的操作，并且每一个线程都能在自己的自治域中看到该数据结构。要为线程提供并发访问数据结构的机会，本质上是使用互斥量提供互斥特性：在互斥量的保护下，同一时间只有一个线程可以获取互斥锁。互斥量为了保护数据，显式的阻止了线程对数据结构的并发访问。
+
++ 保证无线程能够看到，数据结构的不变量破坏时的状态。
++ 小心那些会引起条件竞争的借口，提供完整操作的函数，而非操作步骤。
++ 注意数据结构的行为是否会产生异常，从而确保不变量的状态稳定。
++ 将死锁的概率降到最低。使用数据机构时，需要限制锁的范围，并且避免嵌套锁的存在。
+
+普通的构造函数和析构函数需要独立访问数据结构，所以用户在使用的时候，就不能在构造函数完成前，或者析构函数完成后，对数据结构进行访问。当数据机构支持赋值，swap()，或者拷贝构造时，作为数据机构的设计者，即使数据结构中有大量的函数被线程操作，也需要保证这些操作在并发环境下时安全的。
+
++ 锁的范围中的操作，是否允许在所外执行。
++ 数据结构中不同的区域是否能被不同的互斥量所保护。
++ 所有操作都需要同级互斥量保护么？
++ 能否对数据结构进行简单的修改，以增加并发访问的概率，且不影响操作语义。
+
+最简单的线程安全结构，通常使用的是互斥量和锁。
+
+## 基于锁的并发数据结构
+
+需要保证访问线程持有锁的时间最短。
+
+```C++
+#include<exception>
+struct empty_stack: std::exception{
+    const char* what() const throw();
+};
+
+template<typename T>
+class thread_stack{
+private:
+    std::stack<T> data;
+    mutable std::mutex m;
+public:
+    threadsafe_stack() {}
+    threadsafe_stack(const threadsafe_stack& other){
+        std::lock_guard<std::mutex> lock(other.m);
+        data = other.data;
+    }
+    
+    threadsafe_stack& operator=(const threadsafe_stack&) = delete;
+    
+    void push(T new_value){
+        std::lock_guard<std::mutex> lock(m);
+        data.push(std::move(new_value));
+    }
+    
+    std::shared_ptr<T> pop(){
+        std::lock_guard<std::mutex> lock(m);
+        if(data.empty()) throw empty_stack();
+        std::shared_ptr<T> cosnt res(
+            std::make_shared_ptr<T>(std::move(data.top())));
+        data.pop();
+        return res;
+    }
+    
+    void pop(T& value){
+        std::lock_guard<std::mutex> lock(m);
+        if(data.empty()) throw empty_stack();
+        value = std::move(data.top());
+        data.pop();
+    }
+    
+    bool empty() const{
+        std::lock_guard<std::mutex> lock(m);
+        return data.empty();
+    }
+};
+```
+
+这个代码，在拷贝或者移动构造的时候，还有对数据进行拷贝赋值和移动赋值操作的时候。(不是很明白)
+
+### 线程安全队列——使用锁和条件变量
+
+```C++
+template<typename T>
+class threadsafe_queue{
+private:
+    mutable std::mutex mut;
+    std::queue<T> data_queue;
+    std::condition_variable data_cond;
+public:
+    thread_safe_queue(){
+        
+    }
+    
+    void push(T new_value){
+        std::lock_guard<std::mutex> lk(mut);
+        data_queue.push(std::move(data));
+        data_cond_notify_one();
+    }
+    //如果队列是empty，那么就等待，直到push进去了值，使他不为empty，然后再继续运行
+    void wait_and_pop(T& value){
+        std::unique_lock<std::mutex> lk(mut);
+        data_cond.wait(lk, [this]{return !data_queue.empty();});
+        value = std::move(data_queue.front());
+        data_queue.pop();
+	}
+    
+    std::shared_ptr<T> wait_and_pop(){
+        std::unique_lock<std::mutex> lk(mut);
+        data_cond.wait(lk, [this]{return !data_queue.empty();});
+        //如果此处抛出异常，那么会导致其他线程永远不会被唤醒
+        //提到方案是使用shared_ptr来管理数据，避免在锁中构造。
+        std::shared_ptr<T> res(std::make_shared<T>(std::move(data_queue.front())));
+        data_queue.pop();
+        return res;
+	}
+    
+    bool try_pop(){
+        std::lock_guard<std::mutex> lk(mut);
+        if(data_queue.empty())
+            return false;
+        
+        value = std::move(data_queue.front());
+        data_queue.pop();
+        return true;
+    }
+    
+    std::shared_ptr<T> try_pop(){
+        std::lock_guard<std::mutex> lk(mut);
+        if(data_queue.empty())
+            return std::shared_ptr<T>();
+        
+        std::shared_ptr<T> res(std::make_shared<T>(std::move(data_queue.front())));
+        data_queue.pop();
+        return res;
+    }
+    
+    bool empty() const{
+        std::lock_guard<std::mutex> lk(mut);
+        return data_queue.empty();
+    }
+};
+```
+
+### 线程安全队列——使用细粒度锁和条件变量
+
+```C++
+template<typename T>
+class queue{
+private:
+    struct node{
+      	T data;
+        std::unique_ptr<node> next;
+        node(T data_): data(std::move(data_)){}
+    };
+    //保证节点在删除的时候，不需要用delete来显式删除
+    std::unique_ptr<node> head;
+    node* tail;
+public:
+    queue()=default;
+    queue(const queue& other) = delete;
+    queue& operator=(const queue& other) = delete;
+    std::shared_ptr<T> try_pop(){
+        //如果头节点为null
+        if(!head){
+            return std::shared_ptr<T>();
+        }
+        //否则弹出数据。
+        std::shared_ptr<T> const res(std::make_shared<T>(std::move(head->data)));
+        std::unique_ptr<node> const old_head = std::move(head);
+        head = std::move(old_head->next);
+        return res;
+	}
+    
+    void push(T new_value){
+        std::unique_ptr<node> p(new node(std::move(new_value)));
+        node* const new_tail = p.get();
+        if(tail){
+            tail->next = std::move(p);
+        }else{
+            head = std::move(p);
+        }
+        tsil = new_tail;
+    }
+}
+```
+
+push操作可能会同时修改头指针和尾指针，如果选择使用两个互斥量，push函数会同时获取两个互斥量。
+
+如果head==tail的时候，head- >next和 tail->next是同一个对象，并且这个对象需要保护，在同一个对象未被head和tail同时访问的时候，push和try_pop锁住的是同一个锁。
+
+###### 通过分离数据结构实现并发
+
+可以使用“预分配一个虚拟阶段（无数据）”，确保这个节点永远在队列的最后，用来分离头尾指针能访问节点的方法。
+
+```c++
+template<typename T>
+class queue{
+private:
+    struct node{
+        std::shared_ptr<T> data;
+        std::unique_ptr<node> next;
+    };
+    
+    std::mutex head_mutex;
+    std::mutex tail_mutex;
+    //意味着head不能使空指针
+    std::unique_ptr<node> head;
+   	std::condition_variable data_cond;
+    
+    node* tail;
+    
+        node* get_tail(){
+        std::lock_guard<std::mutex> tail_lock(tail_mutex);
+        return tail;
+    }
+    
+    std::unique_ptr<node> pop_head(){
+        std::lock_guard<std::mutex> head_lock(head_mutex);
+        //调用get_tail前head_mutex已经上锁。
+        //可以有效避免死锁。并且保证在获取tail之后没有其他线程对head进行修改
+        if(head.get() == get_tail()){
+            return nullptr;
+        }
+        std::unique_ptr<node> old_head = std::move(head);
+        head = std::move(old_head->next);
+        return old_head;
+    }
+public:
+    queue(): head(new node), tail(head.get()){}
+    
+    queue(const queue& other)=delete;
+    queue& operator=(const queue& other) = delete;
+
+    std::shared_ptr<T> try_pop(){
+		std::unique_ptr<node> old_head = pop_head();
+        return old_head? old_head->data : std::shared_ptr<T>();
+    }
+    
+    //现在push只访问tail而不能访问head
+    //所以现在try_pop和push不能对同一节点进行操作，所以这里已经不在需要互斥了，所以可以只需要使用一个互斥量来保护数据。
+    void push(T new_value){
+        //在堆上建立实例，使用make_shared是为了避免内存二次分配，增加引用次数。
+        std::shared_ptr<T> new_data(std::make_shared<T>(std::move(new_value)));
+        std::unique_ptr<node>p(new node);
+        {
+        	std::lock_guard<std::mutex> tail_lock(tail_mutex);
+        	tail->data=new_data;
+            node* const new_tail = p.get;
+        	tail->next=std::move(p);
+        	tail = new_tail;
+        }
+    	data_cond>notify_one    
+    }
+}:
+```
+
+为了实现wait_and_pop()函数之后的重载
+
+```c++
+//此处将锁移出。
+template<typename T>
+std::unique_ptr<node> threadsafe_queue<T>::pop_head(){
+    std::unique_ptr<node> old_head = std::move(head);
+    head = std::move(old_head->next);
+    return old_head
+}
+
+//对条件变量进行等待，同时还将锁的实例返回给调用者。
+template<typename T>
+std::unique_lock<std::mutex> threadsafe_queue<T>::wait_for_data(){
+	std::unique_lock<std::mutex> head_lock(head_mutex);
+    data_cond.wait(head_lock, [&]{return head.get()!=get_tail()});
+    return std::move(head_lock);
+}
+
+template<typename T>
+std::unique_ptr<node> threadsafe_queue<T>::wait_pop_head(){
+    std::unique_lock<std::mutex> head_lock(wait_for_data());
+    return pop_head();
+}
+
+template<typename T>
+std::unique_ptr<node> threadsafe_queue<T>::wait_pop_head(T& value){
+    std::unqiue_lock<std::mutex> head_lock(wait_for_data());
+    value = std::move(*head->data);
+    return pop_head();
+}
+
+template<typename T>
+void threadsafe_queue<T>::wait_and_pop(T& value){
+    std::unique_ptr<node> const old_head = wait_pop_head(value);
+}
+```
+
+
+
