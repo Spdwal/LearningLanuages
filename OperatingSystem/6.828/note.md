@@ -6,8 +6,117 @@
 
 #### 手册一本- -。。。。 The PC Assembly Language Book
 
-TODO
-这本书使用的汇编为nasm汇编，nasm汇编用的是intel语法，但是课程用的GCC汇编是AT&T语法，所以再附送手册一本
+#### C inline 汇编
+
+格式为:
+
+```c
+asm(code-strings)
+```
+
+但是单纯的这么作，可能因为优化而产生自己不想要得到的后果。
+
+gcc同时提供了一种更加优异的嵌入汇编方式：
+
+```c
+asm(code-strings [: output-list [: input-list [: overwrite-list]]]);
+```
+
+方括号里的都是可选择的参数。
+
+code-strings里面使用了类似于printf一样的参数格式化，例如%eax寄存器，使用的format-string为%%eax。
+
+Output-list 有着如下的格式
+
+```
+[name] tag (expr)
+```
+
+这个格式确定了操作的名字，输出的内容，而后的C表达式指定指令的结果存储的变量。
+
+tag指定了output操作的限制，具体限制如下表
+
+| constraint | Meaning                          |
+| ---------- | -------------------------------- |
+| "=r"       | 更新寄存器内的数据               |
+| "+r"       | 读取并且更新寄存器内的数据       |
+| "=m"       | 更新内存中的数据                 |
+| "+m"       | 读取并且更新内存中的数据         |
+| "=rm"      | 更新寄存器或内存中的数据         |
+| "+rm"      | 读取和更新及存取或者内存中的数据 |
+
+expr中可以是任何可赋值的变量，也即是俗称的左值。
+
+Input-list也是有着相同的格式。但是只有"r","m","rm"来指定是从寄存器，还是内存，或者两者都是中读取数据。
+
+gcc甚至会对寄存器进行优化
+
+```c
+int tmult_ok3(long x, long y, long *dest){
+    unsigned char bresult;
+    *dest - x * y;
+    asm("setae %[b]       #set result"
+        : [b] "=r" (bresult)
+        );
+    return (int)  bresult;
+}
+```
+
+编译器会自动为%[b]选择合适长度的寄存器。下面再看一个例子。
+
+```c
+int umult_ok(unsigned x, unsigned long y, unsigned long *dest){
+    unsigned char bresult;
+    
+    asm("moveq %[x], %%rax           "
+        "mulq %[y]                   "
+        "movq %%rax                  "
+        : [p] "=m" (*dest), [b] "=r" (bresult)    // outputs
+        : [x] "r" (x), [y] "r" (y)                // inputs
+        : "%rax", "rdx"                           //overwrites 
+    )
+}
+```
+
+最后的overwrites表示rax和rdx需要更新。我们通常在这里指定我们使用了哪些寄存器或者内存。
+
+###### flags
+
+| 分类       | 限定符  | 描述                                                         |
+| ---------- | ------- | ------------------------------------------------------------ |
+| 通用寄存器 | "a"     | 输入变量放入eax。如果eax已经被使用，就将eaxpush到堆栈，最后再pop出来。 |
+|            | "b"     | 将输入变量放入ebx                                            |
+|            | "c"     | 将输入变量放入ecx                                            |
+|            | "d"     | 将输入变量放入edx                                            |
+|            | "s"     | 将输入变量放入esi                                            |
+|            | "d"     | 将输入变量放入edi                                            |
+|            | "q"     | 将输入变量放入eax，ebx，ecx，edx中的一个                     |
+|            | "r"     | 将输入变量放入通用寄存器，也就是eax，ebx，ecx, edx，esi，edi中的一个 |
+|            | "A"     | 把eax和edx合成一个64 位的寄存器(use long longs)              |
+| 内存       | "m"     | 内存变量                                                     |
+|            | "o"     | 操作数为内存变量，但是其寻址方式是偏移量类型，也即是基址寻址，或者是基址加变址寻址 |
+|            | "V"     | 操作数为内存变量，但寻址方式不是偏移量类型                   |
+|            | " "     | 操作数为内存变量，但寻址方式为自动增量                       |
+|            | "p"     | 操作数是一个合法的内存地址（指针）                           |
+| 立即数     | "I"     | 0-31之间的立即数（用于32位移位指令）                         |
+|            | "J"     | 0-63之间的立即数（用于64位移位指令                           |
+|            | "N"     | 0-255之间的立即数（用于out指令）                             |
+|            | "i"     | 立即数                                                       |
+|            | "n"     | 立即数，有些系统不支持除字以外的立即数，这些系统应该使用"n"而不是"i" |
+| 匹配       | " 0 "   | 表示用它限制的操作数与某个指定的操作数匹配，                 |
+|            | "1" ... | 也即该操作数就是指定的那个操作数，例如"0"                    |
+|            | "9"     | 去描述"％1"操作数，那么"%1"引用的其实就是"%0"操作数，注意作为限定符字母的0－9 与指令中的"％0"－"％9"的区别，前者描述操作数，后者代表操作数。 |
+|            | &       | 该输出操作数不能使用过和输入操作数相同的寄存器               |
+| 操作数类型 | "="     | 操作数在指令中是只写的（输出操作数）                         |
+|            | "+"     | 操作数在指令中是读写类型的（输入输出操作数）                 |
+| 浮点数     | "f"     | 浮点寄存器                                                   |
+|            | "t"     | 第一个浮点寄存器                                             |
+|            | "u"     | 第二个浮点寄存器                                             |
+|            | "G"     | 标准的80387浮点常数                                          |
+|            | %       | 该操作数可以和下一个操作数交换位置                           |
+|            | #       | 部分注释，从该字符到其后的逗号之间所有字母被忽略             |
+|            | *       | 表示如果选用寄存器，则其后的字母被忽略                       |
+
 #### Brennan's Guide to Inline Assembly
 
 ##### 语法上的区别
@@ -469,7 +578,7 @@ bootmain(void)
 		uint32_t p_type;                  //当前program的段类型
 		uint32_t p_offset;                //段的第一个字节在文件中的偏移
 		uint32_t p_va;                    //段的第一个字节在文件中的虚拟地址
-		uint32_t p_pa;                    //段的第一个字节在文件中的物理地址，在屋里内存定位相关的系统中使用
+		uint32_t p_pa;                    //段的第一个字节在文件中的物理地址，在物理内存定位相关的系统中使用
 		uint32_t p_filesz;                //段在文件中的长度
 		uint32_t p_memsz;                 //段在内存中的长度
 		uint32_t p_flags;                 //与段相关的标识位
@@ -477,7 +586,9 @@ bootmain(void)
 	};
 
     ************************************************************/
-	struct Proghdr *ph, *eph;
+    // eph是end of program header table
+    // 也就是program header tables 的最后一个 program header
+    struct Proghdr *ph, *eph;
 
 	// read 1st page off disk
     //读取从0开始的8个扇区放入ELFHDR位置
@@ -490,13 +601,16 @@ bootmain(void)
 		goto bad;
 
 	// load each program segment (ignores ph flags)
-    // 找到program header
+    // 找到program header的地址。 e_phoff是相对文件的offset
+    // 同时ELF的地址也就是文件的地址。
 	ph = (struct Proghdr *) ((uint8_t *) ELFHDR + ELFHDR->e_phoff);
 	eph = ph + ELFHDR->e_phnum;
-    //将每一段从屋里地址中放入内存中。
+    //将每一个section从物理地址中放入内存中。
 	for (; ph < eph; ph++)
 		// p_pa is the load address of this segment (as well
 		// as the physical address)
+        // memsz -> memeory size;
+        // 物理地址读取到program offset处。
 		readseg(ph->p_pa, ph->p_memsz, ph->p_offset);
 
 	// call the entry point from the ELF header
