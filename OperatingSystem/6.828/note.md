@@ -593,6 +593,8 @@ bootmain(void)
 	// read 1st page off disk
     //读取从0开始的8个扇区放入ELFHDR位置
     //也就是程序起始位置
+    // 此处应该也将program header tables 给读取进入了内存。
+    // 没有找到官方资料，但是问过一些内核开发人员，可执行文件和共享文件都有 program header table。
 	readseg((uint32_t) ELFHDR, SECTSIZE*8, 0);
 
 	// is this a valid ELF?
@@ -640,9 +642,11 @@ readseg(uint32_t pa, uint32_t count, uint32_t offset)
 	end_pa = pa + count;
 
 	// round down to sector boundary
+    // 确认扇区边界，将其全部置0
 	pa &= ~(SECTSIZE - 1);
 
 	// translate from bytes to sectors, and kernel starts at sector 1
+    // 计算扇区编号
 	offset = (offset / SECTSIZE) + 1;
 
 	// If this is too slow, we could read lots of sectors at a time.
@@ -653,6 +657,7 @@ readseg(uint32_t pa, uint32_t count, uint32_t offset)
 		// an identity segment mapping (see boot.S), we can
 		// use physical addresses directly.  This won't be the
 		// case once JOS enables the MMU.
+        // 从编号offset的扇区中读取数据进入文件的物理地址
 		readsect((uint8_t*) pa, offset);
 		pa += SECTSIZE;
 		offset++;
@@ -663,6 +668,8 @@ void
 waitdisk(void)
 {
 	// wait for disk reaady
+    // 一直从0x1f7中读取数据，直到他空闲为止。
+    // 0x40这个位为1，就表示它空闲。
 	while ((inb(0x1F7) & 0xC0) != 0x40)
 		/* do nothing */;
 }
@@ -673,7 +680,9 @@ readsect(void *dst, uint32_t offset)
 	// wait for disk to be ready
 	waitdisk();
 
+    //读入一个扇区
 	outb(0x1F2, 1);		// count = 1
+    //将需要读取的扇区编号传入，因为扇区编号过长，所以分成4段传入
 	outb(0x1F3, offset);
 	outb(0x1F4, offset >> 8);
 	outb(0x1F5, offset >> 16);
@@ -684,6 +693,9 @@ readsect(void *dst, uint32_t offset)
 	waitdisk();
 
 	// read a sector
+    // 0x1F0是硬盘接口的数据端口，而且还是一个16位的端口，一旦硬盘空闲且准备就绪，
+    // 就可以连续从这额端口写入或者读取数据。
+    // 因为一次操作会读取4个字节，所以这里需要除4.
 	insl(0x1F0, dst, SECTSIZE/4);
 }
 ```
@@ -702,3 +714,154 @@ ljmp 0xb866, $0x87c32
 ```
 
 无伤大雅，基本上实现的功能一样。
+
+__跟踪调试 boot/main.c中的bootmain函数，然后跟踪调试readsec函数，指出每个汇编指令是readsect中的哪一条语句，然后指出for循环开始和结尾从扇区中读入了什么，找出来循环结束后，运行了什么代码，在在那个代码出大一个断点，然后跟踪调试bootloader。__
+
+直接make gdb，然后b bootmain没有用，找不到这个函数，我是在obj/boot/boot.asm中找到：
+
+```nasm
+00007d19 <bootmain>
+```
+
+找到bootmain的地址，而后直接
+
+```gdb
+b *0x7d19
+continue
+```
+
+然后进入bootmain的运行。
+
+```nasm
+0x7d19: push %ebp                    # ebp = 0x0
+0x7d1a: move %esp, %ebp              # ebp = esp = 0x7bf8 也就是0x7c00的前一个字节。
+0x7d1c: push %esi                    # esi = 0
+0x7d1d: push %ebx                    # ebx = 0
+# 保存参数，准备调用函数
+# 表示下面语句是调用一条c语言语句
+readseg((uint32_t) ELFHDR, SECTSIZE*8, 0);
+0x7d1e: push %edx                    # edx = 0;
+# 通过栈传递参数
+0x7d1f: push 0x0
+0x7d21: push 0x1000
+0x7d26: push 0x10000
+0x7d2b: call 7cda <readseg>
+# redseg,将头8个扇区放入ELFHDR处，
+0x7cda: push %ebp                    # 保存地址，方便ret，ebp = 0x7cda
+0x7cdb: mov %esp, %ebp               # ebp = esp = 0x7db8  栈往下延伸。
+0x7cdd: push %edi                    # edi = 0
+0x7cde: push %esi                    # esi = 0
+0x7cdf: push %ebx                    # ebx = 0
+0x7ce0: sub %0xc, %esp               # esp = 0x7bc0
+# 取出三个参数
+0x7ce3: mov 0x10(%ebp), %edi         # edi = 0
+0x7ce6: mov 0x8(%ebp), %ebx          # ebx = 10000
+0x7ce9: mov 0xc(ebp), %esi           # esi = 1000
+# offset = (offset / SECTSIZE)
+0x7cec: shr $0x9, $edi               # edi = 0
+# end_pa = pa + count
+0x7cef: add %ebx, %esi               # esi = 0x11000
+# offset = (offset / SECTSIZE) + 1;
+0x7cf1: inc %edi                     # edi = 1
+# pa &= ~(SECTSIZE - 1)
+0x7cf2: and $0xfffffe00, %ebx        # ebx = 65536
+# while(pa < end_pa)
+0x7cf8: cmp %esi, %ebx
+0x7cfa: jae 0x7d11
+# readsect((uint8_t*)pa, offset)    保存寄存器
+0x7cfc: push %eax                    # eax = 0x10
+0xfcfd: push %eax                    # eax = 0x10
+0x7cfe: push %edi                    # edi = 1
+# offset++
+0x7cff: inc %edi                     # edi = 2
+0x7d00: push %ebx                    # ebx = 0x10000
+# pa += SECTSIZE
+0x7d10: add $0x200, %ebx             # ebx = 0x10200
+# call readsect
+0x7d07: call 0x7c78   
+# 保存参数
+0x7c78: push %ebp
+0x7c79: mov %esp, %ebp               
+0x7c7b: push %edi                    
+# offset = 1
+0x7c7d: mov 0xc(%ebp), %ecx          # ecx = 1
+# 它此处将inb和waitdisk顺序放置，如果inb执行结束，自动执行waitdisk
+# call inb
+0x7c80: call 0x7c6a
+# inb(0x1F7) 将
+0x7c6a: mov $0x1f7, %edx             # edx = 0x1f7
+#将从0x1f7内读取出的数据放入%al中
+0x7c6f: in (%dx), %al                # al = 0x50
+# waitdisk 与之前的inb结合称完整的waitdisk函数
+# while((inb(0x1F7) & 0xC0) != 0x40)
+0x7c70: and $0xffffffc0, %eax
+0x7c73: cmp 0x40, %al
+0x7c75: jne 7c7f
+0x7c77: ret
+# outb(0x1f2, 1)
+0x7c85: mov $0x1, %al
+0x7c87: mov $0x1f2, %edx
+0x7c8c: out %al, (%dx)
+# oub(0x1f3, offset)
+0x7c8d: mov $0x1f3, %edx
+0x7c92: mov %ecx, %eax
+0x7c94: out %al, (%dx)
+# outb(0x1f4, offset >> 8)
+0x7c97: mov $0x1f4, %edx
+0x7c9c: shr $0x8, %eax               # eax = 0
+0x7c9f: out %al, (%dx)
+# outb(0x1f6, offset >> 16)
+0x7ca0: mov %ecx, %eax
+0x7ca2: mov $0x1f5, %edx             # eax = offset
+0x7ca7: shr $0x10, %eax              # eax = offset >> 0x10 = 0
+0x7caa: out %al, (%dx)
+#outb(0x1f6, (offset >> 24) | 0xe0)
+0x7cab: mov %ecs, %eax
+0x7cad: mov %0x1f6, %edx
+0x7cb2: shr $0x18, %eax
+0x7cb5: or $0xffffffe0, %eax
+0x7cb8: out %al, (%dx)
+# outb(0x1f7, 0x20);
+0x7cb9: mov $0x20, %al
+0x7cbb: mov $0x1f7, %edx
+0x7cc0: out %al, (%dx)
+# call waitdisk
+# 等待io
+0x7cc1: call 0x7c6a
+# 内嵌汇编，主要是调用 insl(0x1f0, dst, SECTSIZE/4)
+0x7cc6: mov 0x8(%ebp), %edi
+0x7cc9: mov $0x80, $ecx
+0x7cce: mov $0x1f0, %edx
+# cld清除标识位，表明一个串操作完成后源操作数和目的操作数的地址加1
+0x7cd3: cld
+# repnz叫重复串操作指令，它是一个浅灰，位于一条指令之前，这条指令会被一支重复执行。
+# 并且知道计数寄存器的值满足某个条件。repnz重复后面的串操作指令%ecx次。
+# dx为端口号0x1f0,%edi存放的是要呗存放的内存空间的起始地址，第一次循环时候也就是pa，0x10000。
+# 此时 p *0x10000 0x464c457f，也就是ELF->e_magic的值
+0x7cd4: repnz insl (%dx), %es:(%edi)
+0x7cd6: pop %edx
+0x7cd7: pop %edi
+0x7cd8: pop %ebp
+0x7cd9: ret
+# continue to end of loop
+# ...
+# if(ELFHRD->e_magic != ELF_MAGIC)
+0x7d30: add $0x10, $esp
+0x7d33: cmpl $0x464c457f, 0x1000
+0x7d3d: jne 0x7d77
+# ph = (struct Proghdr *)((uint8_t *) ELFHDR + ELFHDR->e_phoff)
+0x7d3f: mov 0x1001c, %eax            # 这里0x1001c没有加$，所以是将0x1001c处的数据放入eax = 0x34 此处存放的是ELFHDR->e_phoff
+# eph = ph + ELFHRD->e_phnum
+0x7d44: movzwl 0x1002c, %esi         # esi = 3 此处为ELFHDR->e_phnum
+0x7d4b: lea 0x100000(%eax), %ebx     # ebx = 0x1003
+0x7d51: shl $0x5, %esi               # 1个ptr 32位，所以此处左移5位， esi = 96
+0x7d54: add %ebx, %esi               # esi = 0010094 也就是eph
+0x7d58: jae 
+0x7d5a: push %eax
+# 进入循环，continue
+# ...
+# ((void (*)(void)) (ELFHDR->e_entry))()
+0x7d71: call *0x10018                
+# bootmain结束
+```
+
