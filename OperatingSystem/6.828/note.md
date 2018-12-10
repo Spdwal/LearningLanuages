@@ -865,3 +865,105 @@ readseg((uint32_t) ELFHDR, SECTSIZE*8, 0);
 # bootmain结束
 ```
 
+## Exercise 4
+
+让阅读K&R和了解指针，太简单，跳过。
+
+需要阅读并理解boot/main.c，在这之前已经做过了。
+
+此处有一本ELF的专门书籍需要阅读TODO。
+
+一个ELF位于载入信息的头部，之后跟随着数个程序段。每一个程序段之间互相毗邻，它们将会被载入进内存的特定位置。Boot Loader不会改变代码或者数据，当它们被载入进内存后就会被运行。
+
+一个ELF二进制文件，头部有一个固定长度的ELF HEADER，它后面跟着一个可变长度的program header，program header列出了所有将要被载入的程序节。在inc/elf.h中定义了ELF，在程序节中我们主要对以下几个部分感兴趣：
+
++ .text: 程序的运行指令
++ .rodata: 只读数据，比如字符串常量值等等。
++ .data: 程序里被初始化的数据。
++ 当连接器计算一个程序需要的内存的时候。它会为一些没有初始化的全局数据预留空间，这个程序节的名字叫做.bss，它位于.data后面。加载器或者程序本身，将会将这一段内存置0。在c语言中，未被初始化的全局变量都会被初始化为0。所以.bbs节并没有必要在ELF文件中占空间，作为替代，链接器只记录了.bss段的地址和大小。
+
+利用objdump 来查看运行文件的布局：
+
+```shell
+objdump -h obj/kern/kernel
+```
+
+>
+>
+>obj/kern/kernel:     file format elf32-i386
+>
+>Sections:
+>Idx Name          Size      VMA       LMA       File off  Algn
+>  0 .text         000017bf  f0100000  00100000  00001000  2**4
+>​                  CONTENTS, ALLOC, LOAD, READONLY, CODE
+>  1 .rodata       00000714  f01017c0  001017c0  000027c0  2**5
+>​                  CONTENTS, ALLOC, LOAD, READONLY, DATA
+>  2 .stab         0000420d  f0101ed4  00101ed4  00002ed4  2**2
+>​                  CONTENTS, ALLOC, LOAD, READONLY, DATA
+>  3 .stabstr      000019b6  f01060e1  001060e1  000070e1  2**0
+>​                  CONTENTS, ALLOC, LOAD, READONLY, DATA
+>  4 .data         0000a300  f0108000  00108000  00009000  2**12
+>​                  CONTENTS, ALLOC, LOAD, DATA
+>  5 .bss          00000648  f0112300  00112300  00013300  2**5
+>​                  CONTENTS, ALLOC, LOAD, DATA
+>  6 .comment      0000002c  00000000  00000000  00013948  2**0
+>​                  CONTENTS, READONLY
+
+在这里我们可以看到一些除了我们之前提到的三个数据节之外的东西，这些东西中一大部分是为了调试准备的，它们在运行的之后并不会载入进内存。
+
+终端关注一下.text节中的__VMA__(link adress or virtual memory adress)和__LMA__(load memory adress)，VMA的地址是在内存中程序将要运行的地址，CPU运行的时候都是虚拟地址，经过MMU转化为物理地址。当一段代码需要一个全局变量的地址，如果这个地址没有被链接，那么这个二进制文件就不会被正确执行。链接被现代链接库所使用，所但是它有着额外的性能和复杂度消耗，所以在6.828中并不会使用它。
+
+一般来说，link和load adress都是相同的，接下来我们看看bootloader的内存布局：
+
+```shell
+objdump -h obj/boot/boot.out
+```
+
+>obj/boot/boot.out:     file format elf32-i386
+>
+>Sections:
+>Idx Name          Size      VMA       LMA       File off  Algn
+>  0 .text         0000018c  00007c00  00007c00  00000074  2**2
+>​                  CONTENTS, ALLOC, LOAD, CODE
+>  1 .eh_frame     0000009c  00007d8c  00007d8c  00000200  2**2
+>​                  CONTENTS, ALLOC, LOAD, READONLY, DATA
+>  2 .stab         00000870  00000000  00000000  0000029c  2**2
+>​                  CONTENTS, READONLY, DEBUGGING
+>  3 .stabstr      00000940  00000000  00000000  00000b0c  2**0
+>​                  CONTENTS, READONLY, DEBUGGING
+>  4 .comment      0000002c  00000000  00000000  0000144c  2**0
+>​                  CONTENTS, READONLY
+
+在这个文件中，VMA和LMA地址相同，我们也可以只看program headers
+
+```shell
+objdump -x obj/kern/kernel
+```
+
+>obj/kern/kernel:     file format elf32-i386
+>obj/kern/kernel
+>architecture: i386, flags 0x00000112:
+>EXEC_P, HAS_SYMS, D_PAGED
+>start address 0x0010000c
+>
+>Program Header:
+>​    LOAD off    0x00001000 vaddr 0xf0100000 paddr 0x00100000 align 2**12
+>​         filesz 0x00007a97 memsz 0x00007a97 flags r-x
+>​    LOAD off    0x00009000 vaddr 0xf0108000 paddr 0x00108000 align 2**12
+>​         filesz 0x0000a948 memsz 0x0000a948 flags rw-
+>   STACK off    0x00000000 vaddr 0x00000000 paddr 0x00000000 align 2**4
+>​         filesz 0x00000000 memsz 0x00000000 flags rwx
+>
+>Sections:
+>
+>...
+>
+>Symbol table:
+>
+>...
+
+vaddr和paddr分别是虚拟地址和物理地址。
+
+## Exercise 5
+
+__BIOS加载boot扇区进入地址为0x7c00的内存，所以这里就是boot扇区的加载地址，boot扇区也是从这里开始运行，所以这里也是它的链接地址，我们在boot/Makefrag中将link adress利用指令 -Ttext 0x7c00进行设置，然后代码可以产生出正确的内存地址进行运行，__
