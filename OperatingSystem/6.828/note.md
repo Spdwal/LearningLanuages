@@ -966,4 +966,53 @@ vaddr和paddr分别是虚拟地址和物理地址。
 
 ## Exercise 5
 
-__BIOS加载boot扇区进入地址为0x7c00的内存，所以这里就是boot扇区的加载地址，boot扇区也是从这里开始运行，所以这里也是它的链接地址，我们在boot/Makefrag中将link adress利用指令 -Ttext 0x7c00进行设置，然后代码可以产生出正确的内存地址进行运行，__
+__BIOS加载boot扇区进入地址为0x7c00的内存，所以这里就是boot扇区的加载地址，boot扇区也是从这里开始运行，所以这里也是它的链接地址，我们在boot/Makefrag中将link adress利用指令 -Ttext 0x7c00进行设置，然后代码可以产生出正确的内存地址进行运行，在这个练习中，将link adress修改为错误的地址，然后再次跟踪调试boot loader，看一看会发生什么。__
+
+我将0x7c00改成了0x6c00，然后make clean，make重新编译之后，发现多出来一条警告信息：
+
+```
+ld: warning: section '.bss' type changed to PROGBITS
+```
+
+然后我在stackoverflow对这条警告信息找到了如下的解释：
+
+>When the BSS section is changed to PROGBITS, the effect is that there are more NUL bytes (zeroes) in the output file. When .bss is NOBITS (what it should be), the linker puts information in the output file that tell the operating system to wipe a section of memory to all zeroes when the program is loaded. If it's PROGBITS, then this information only tells the operating system to load the memory area from the file, and that section of the file is filled with zeroes. So the only negative effect is that the output file is bigger.
+
+简单的来说就是：如果.bss是NOBITS的，那么链接器会在输出的文件里告诉操作系统当这个程序被加载的时候，根据提供的信息，将某一块内存给分配出来，并置0，但是如果是PROGBITS的话，就是告诉系统从文件里取出一块已经被置0的数据段存入内存中，所以区别就在NOBITS的文件中，.bbs数据段是不占用空间的，但是PROGBITS的数据段是占用空间的。虽然最后对运行的程序没什么影响，最大的影响是可执行文件多了一块被置零的数据段，需要占用更多的空间。
+
+make qemu后，无限跳 Booting from Hard Disk。可以肯定是有错误了。
+
+然后正常的make qemu-gdb，make gdb，还是和刚才一样无限跳一样的错误，完全不能跟踪到我打下的断点0x6c00，目测凡是把地址改成在0x7c00之前的，都会导致这样的情况。
+
+现在将地址改成0c7d00。
+
+BIOS会默认将程序装载在0x7c00处，打断点在0x7c00。随便跟踪几条语句：
+
+```nasm
+0c7c00: cli
+0x7c01: cld
+...
+```
+
+暂时看来没有任何区别，然后运行到这一条指令的时候
+
+```nasm
+0x7c1e: lgdtl (%esi)
+```
+
+通过打印信息发现，%esi中存储的值为0，然后使用
+
+```
+x/6xb ($esi)
+0x0: 0x53 0xff 0x00 0xf0 0x53 0xff
+```
+
+虽然里面也有数据，但是用脑子想想中断描述符表也不应该在内存的0x0处，此处存疑，接下来往下走。
+
+然后调试之后，遇到一句：
+
+```nasm
+0x7c2d: ljmp $0xb866, $0x87d32
+```
+
+这里错误就很明显了，正常情况下应该是跳转到0x7c2d的下一条语句，并且切换到保护模式，这里已经完全不知道跳转到了什么地方，程序从这里完全走进了错误的道路。
