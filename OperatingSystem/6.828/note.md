@@ -1083,9 +1083,99 @@ f0100008:	fe 4f 52             	decb   0x52(%edi)
 f010000b:	e4                   	.byte 0xe4
 
 f010000c <entry>:
+#即告诉BIOS检测程序“不要做内存检测”。该子程序往物理内存地址0x472处写值0x1234。该位置是启动模式（reboot_mode）标志字。在启动过程中ROM BIOS会读取该启动模式标志值并根据其值来指导下一步的执行。 如果该值是0x1234，则BIOS 就会跳过内存检测过程而执行热启动（Warm-boot）过程。 如果若该值为0，则执行冷启动（Cold-boot）过程。
 f010000c:	66 c7 05 72 04 00 00 	movw   $0x1234,0x472
 f0100013:	34 12 
 ```
 
 为什么之前调试的打印结果不同，正是f010000b处的e4本来是要给数据，被错认为了一个指令，导致打印的指令和预想的不一样，而0x10000c也正是kernel的入口代码。
+
+## Exercise 7
+
+当我们调试boot loader的时候，他的link adress和load adress匹配的非常好，但是kernel的link adress和load adress之间有挺大的不同，通过检查kern/kernel.ld文件，发现kernel的link adress为0xf0100000，而load adress为0x100000。
+
+操作系统内核经常是被链接在一个非常高的virtual adress上，位的是留下低地址给用户程序使用。
+
+有许多机器并没有0xf0100000这么高位的物理地址，所以我们并不能将内核放在这个物理地址上。作为替代，我们使用处理器的内存管理模块来将0xf0100000映射在物理地址0x00100000上。这样一来，不管内核的link adress在多高的位置，他都会被映射在PC的1M RAM处，也就是刚好接在BIOS之后。
+
+在下一个lab中，我们会映射256MB的PC物理地址，从0x00000000都0x0fffffff到虚拟地址0xf0000000到0xffffffff。
+
+现在，我们只映射物理内存的前4MB，为了实现这个目的，我们使用hand-writing statically-initilaized page directiory和页表，他们被写在了kern/entrypgdir.c这个文件中，然后直到kern/entry.S将CR0_PG设置，内存references 被当作物理内存的使用，严格的来说，memory references是一块线性内存，但是boot/boot.S使用一个特殊的映射将它映射为物理地址，并且我们之后不会去改变他。每当CR0_PG被设置的时候，memory references将会被virutal memory hardware翻译成物理地址。
+
+Entry_pgdir将位于0xf0000000到0xf0400000的虚拟地址映射到0x00000000到0x00400000的物理地址。如果虚拟地址不在这个界限内的话，会产生一个硬件错误，但是因为至今为止我们没有设置中断处理，所以这个到吃QEMU中断并且退出，或者一直reboot(没有使用mit的魔改版QEMU的话，难怪我之前改过链接地址后一直不停的reboot)。
+
+__使用QEMU和GDB跟踪调试JOS内核，然后停止在movl %eax, %cr0处，检查内存0x00100000和0xf0100000，然后使用stepi单步进入指令，然后再次检查0x00100000和0xf0100000，确保弄明白到底发生了什么。当行的映射成立后，如果映射不在正确的地址，那么可能不会正常的工作，注释掉kern/entry.S中的 mov %eax, %cr0，然后调试它，看看你是不是正确的。__
+
+```nasm
+0x10001d: mov %cr0, %eax
+0x100020: or $0x80010001, $eax
+0x100025: mov %eax, %cr0                    #eax = 0x80010001
+```
+
+然后运行x/6i 0x100000
+
+```nasm
+0x100000:	add    0x1bad(%eax),%dh
+0x100006:	add    %al,(%eax)
+0x100008:	decb   0x52(%edi)
+0x10000b:	in     $0x66,%al
+0x10000d:	movl   $0xb81234,0x472
+0x100017:	add    %dl,(%ecx)
+```
+
+然后运行x/6x 0xf0100000
+
+```nasm
+0xf0100000 <_start+4026531828>:	0x00000000	0x00000000	0x00000000	0x00000000
+0xf0100010 <entry+4>:	        0x00000000	0x00000000
+```
+
+此处没有数据。再次si，使%cr0被设置。再次运行x/6i 0x0010000，和之前没有区别。运行x/6i 0xf010000之后：
+
+```nasm
+0xf0100000 <_start+4026531828>:	add    0x1bad(%eax),%dh
+0xf0100006 <_start+4026531834>:	add    %al,(%eax)
+0xf0100008 <_start+4026531836>:	decb   0x52(%edi)
+0xf010000b <_start+4026531839>:	in     $0x66,%al
+0xf010000d <entry+1>:	movl   $0xb81234,0x472
+0xf0100017 <entry+11>:	add    %dl,(%ecx)
+```
+
+此时在0xf0100000处的指令已经和0x00100000处一摸一样了。虽然暂时还是不知道尖括号里面代表的啥，但是可以肯定的是0x00100000处的指令已经被映射到了0xf0100000处。
+
+在注释掉move %eax, %cr0之后
+
+```nasm
+0x10002a: jmp *%eax
+0xf010002c <relocated>: add %al(%eax)
+relocated () at kern/entry.S:74
+74		movl	$0x0,%ebp	
+remoted connection closed
+```
+
+报错退出，就连想要x/6i 0xf010002c都不能做到，显示：Cannot access memory at address 0xf010002c。
+
+顺便查了一下CR0的资料，cr0内的不同位有不同的设置。
+
+| bit  | label | descrption            |
+| ---- | ----- | --------------------- |
+| 0    | Pe    | Protected mode enable |
+| 1    | Mp    | Monitor co-processor  |
+| 2    | Em    | Emulation             |
+| 3    | Ts    | Task switched         |
+| 4    | Et    | extension type        |
+| 5    | Ne    | Numeric error         |
+| 16   | Wp    | write protect         |
+| 18   | Am    | alignment mask        |
+| 29   | Nw    | Not-write through     |
+| 30   | Cd    | cache disable         |
+| 31   | Pg    | paging                |
+
+而在设置cr0的时候，传入的是0x80010001，也就是:打开保护模式，打开写保护，打开paging。
+
+paging是分页允许位，他表示芯片上的分页部件是否允许工作。关于paging，wiki摘录如下：
+
+>Paging is a system which allows each process to see a full virtual address space, without actually requiring the full amount of physical memory to be available or present. In fact, current implementations of x86-64 have a limit of between 4 GiB and 256 TiB of physical address space (and an architectural limit of 4 PiB of physical address space).
+
+也就是让处理器可以看到完整的虚拟地址空间，而并不需要真正的这么大的物理地址空间。也就是刚才我们所说的映射。
 
