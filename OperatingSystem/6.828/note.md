@@ -1179,3 +1179,908 @@ paging是分页允许位，他表示芯片上的分页部件是否允许工作�
 
 也就是让处理器可以看到完整的虚拟地址空间，而并不需要真正的这么大的物理地址空间。也就是刚才我们所说的映射。
 
+## Exercise 8
+
+阅读kern/printf.c和lib/printfmt.c和kern/console.c
+
+###### console.c这个文件臣妾看不懂呀。。。
+
+```c
+// kern/console.c
+/* See COPYRIGHT for copyright information. */
+
+#include <inc/x86.h>
+#include <inc/memlayout.h>
+#include <inc/kbdreg.h>
+#include <inc/string.h>
+#include <inc/assert.h>
+
+#include <kern/console.h>
+
+static void cons_intr(int (*proc)(void));
+static void cons_putc(int c);
+
+// Stupid I/O delay routine necessitated by historical PC design flaws
+static void
+delay(void)
+{
+    // 大约滞后4微秒
+	inb(0x84);
+	inb(0x84);
+	inb(0x84);
+	inb(0x84);
+}
+
+/***** Serial I/O code *****/
+
+#define COM1		0x3F8
+
+#define COM_RX		0	// In:	Receive buffer (DLAB=0)
+#define COM_TX		0	// Out: Transmit buffer (DLAB=0)
+#define COM_DLL		0	// Out: Divisor Latch Low (DLAB=1)
+#define COM_DLM		1	// Out: Divisor Latch High (DLAB=1)
+#define COM_IER		1	// Out: Interrupt Enable Register
+#define   COM_IER_RDI	0x01	//   Enable receiver data interrupt
+#define COM_IIR		2	// In:	Interrupt ID Register
+#define COM_FCR		2	// Out: FIFO Control Register
+#define COM_LCR		3	// Out: Line Control Register
+#define	  COM_LCR_DLAB	0x80	//   Divisor latch access bit
+#define	  COM_LCR_WLEN8	0x03	//   Wordlength: 8 bits
+#define COM_MCR		4	// Out: Modem Control Register
+#define	  COM_MCR_RTS	0x02	// RTS complement
+#define	  COM_MCR_DTR	0x01	// DTR complement
+#define	  COM_MCR_OUT2	0x08	// Out2 complement
+#define COM_LSR		5	// In:	Line Status Register
+#define   COM_LSR_DATA	0x01	//   Data available
+#define   COM_LSR_TXRDY	0x20	//   Transmit buffer avail
+#define   COM_LSR_TSRE	0x40	//   Transmitter off
+
+static bool serial_exists;
+
+static int
+serial_proc_data(void)
+{
+	if (!(inb(COM1+COM_LSR) & COM_LSR_DATA))
+		return -1;
+	return inb(COM1+COM_RX);
+}
+
+void
+serial_intr(void)
+{
+	if (serial_exists)
+		cons_intr(serial_proc_data);
+}
+
+static void
+serial_putc(int c)
+{
+	int i;
+
+	for (i = 0;
+         // inb(0x3f8 + 5) = inb(0x3fd) & 0x20，
+         // 读取0x3fd端口，并且判断他的bit5是否为1，既是他发送数据缓冲器是否为空
+         // 如果为空，则计算机发送下一个数据给端口。
+	     !(inb(COM1 + COM_LSR) & COM_LSR_TXRDY) && i < 12800;
+	     i++)
+        //如果不为空，就等待4微秒，然后继续查询，如果查询通过，则打印输出
+		delay();
+    
+	// outb(0x3f8 + 0)
+    // 将要发送的数据c发送给0x3f8，当0x3f8被写入值的时候，他是作为receiver buffer register,
+    // 里面包含了要发送给串口的数据。
+	outb(COM1 + COM_TX, c);
+}
+
+static void
+serial_init(void)
+{
+	// Turn off the FIFO
+	outb(COM1+COM_FCR, 0);
+
+	// Set speed; requires DLAB latch
+	outb(COM1+COM_LCR, COM_LCR_DLAB);
+	outb(COM1+COM_DLL, (uint8_t) (115200 / 9600));
+	outb(COM1+COM_DLM, 0);
+
+	// 8 data bits, 1 stop bit, parity off; turn off DLAB latch
+	outb(COM1+COM_LCR, COM_LCR_WLEN8 & ~COM_LCR_DLAB);
+
+	// No modem controls
+	outb(COM1+COM_MCR, 0);
+	// Enable rcv interrupts
+	outb(COM1+COM_IER, COM_IER_RDI);
+
+	// Clear any preexisting overrun indications and interrupts
+	// Serial port doesn't exist if COM_LSR returns 0xFF
+	serial_exists = (inb(COM1+COM_LSR) != 0xFF);
+	(void) inb(COM1+COM_IIR);
+	(void) inb(COM1+COM_RX);
+
+}
+
+
+
+/***** Parallel port output code *****/
+// For information on PC parallel port programming, see the class References
+// page.
+// The parallel port uses a sub-d 25 connector to provide a 8-bit data bus. It is commonly used by printers. There are 3 kinds of parallel ports: Standard Parallel Port (SPP), Enhanced Parallel Port (EPP) and Extended Capabilities Parallel Port (ECP).
+// 把这个字符输出给并口数据。
+// 在并行端口中，这里只针对其中的一种(IRQ 7)
+// 这里base adress 为0x378，
+// data register adress = base adress + 0
+// status register adress = base adress + 1
+// control register adress = base adress + 2
+
+static void
+lpt_putc(int c)
+{
+	int i;
+
+	for (i = 0; !(inb(0x378+1) & 0x80) && i < 12800; i++)
+		delay();
+    // 0x378 数据端口
+	outb(0x378+0, c);
+    // 0x37A 控制端口。
+    // 传入1101 也就是 STROBE | INITIALISE | SELECT
+    // INTIALISE 写写入端口时， 这个信号为低电平有效。   // 没看懂
+    // STROBE用于握手，并且警告printer，数据端口已经就位
+    // SELECT暂时没有找到具体时什么作用，但是它又很重要。。。很烦。。
+	outb(0x378+2, 0x08|0x04|0x01);
+	outb(0x378+2, 0x08);
+}
+
+
+
+
+/***** Text-mode CGA/VGA display output *****/
+
+static unsigned addr_6845;
+static uint16_t *crt_buf;
+static uint16_t crt_pos;
+
+static void
+cga_init(void)
+{
+	volatile uint16_t *cp;
+	uint16_t was;
+	unsigned pos;
+
+	cp = (uint16_t*) (KERNBASE + CGA_BUF);
+	was = *cp;
+	*cp = (uint16_t) 0xA55A;
+	if (*cp != 0xA55A) {
+		cp = (uint16_t*) (KERNBASE + MONO_BUF);
+		addr_6845 = MONO_BASE;
+	} else {
+		*cp = was;
+		addr_6845 = CGA_BASE;
+	}
+
+	/* Extract cursor location */
+	outb(addr_6845, 14);
+	pos = inb(addr_6845 + 1) << 8;
+	outb(addr_6845, 15);
+	pos |= inb(addr_6845 + 1);
+
+	crt_buf = (uint16_t*) cp;
+	crt_pos = pos;
+}
+
+
+
+static void
+cga_putc(int c)
+{
+	// if no attribute given, then use black on white
+    // 将字符写入buff
+	if (!(c & ~0xFF))
+		c |= 0x0700;
+
+	switch (c & 0xff) {
+    // 对转义字符进行特色处理
+    // \b为退格，所以此时要将指向缓冲区的最后一个字节的指针-1,
+    // 相当于丢弃最后一个字符。
+	case '\b':
+		if (crt_pos > 0) {
+			crt_pos--;
+			crt_buf[crt_pos] = (c & ~0xff) | ' ';
+		}
+		break;
+	case '\n':
+		crt_pos += CRT_COLS;
+		/* fallthru */
+	case '\r':
+		crt_pos -= (crt_pos % CRT_COLS);
+		break;
+	case '\t':
+		cons_putc(' ');
+		cons_putc(' ');
+		cons_putc(' ');
+		cons_putc(' ');
+		cons_putc(' ');
+		break;
+	default:
+        // 除了需要转义的字符，其他的直接写入进crt_buf缓冲区
+		crt_buf[crt_pos++] = c;		/* write the character */
+		break;
+	}
+
+	// What is the purpose of this?
+	if (crt_pos >= CRT_SIZE) {
+		int i;
+		// 将crt_buff里的内容写入进屏幕进行输出
+		memmove(crt_buf, crt_buf + CRT_COLS, (CRT_SIZE - CRT_COLS) * sizeof(uint16_t));
+		for (i = CRT_SIZE - CRT_COLS; i < CRT_SIZE; i++)
+			crt_buf[i] = 0x0700 | ' ';
+		crt_pos -= CRT_COLS;
+	}
+
+	/* move that little blinky thing */
+	outb(addr_6845, 14);
+	outb(addr_6845 + 1, crt_pos >> 8);
+	outb(addr_6845, 15);
+	outb(addr_6845 + 1, crt_pos);
+}
+
+
+/***** Keyboard input code *****/
+
+#define NO		0
+
+#define SHIFT		(1<<0)
+#define CTL		(1<<1)
+#define ALT		(1<<2)
+
+#define CAPSLOCK	(1<<3)
+#define NUMLOCK		(1<<4)
+#define SCROLLLOCK	(1<<5)
+
+#define E0ESC		(1<<6)
+
+static uint8_t shiftcode[256] =
+{
+	[0x1D] = CTL,
+	[0x2A] = SHIFT,
+	[0x36] = SHIFT,
+	[0x38] = ALT,
+	[0x9D] = CTL,
+	[0xB8] = ALT
+};
+
+static uint8_t togglecode[256] =
+{
+	[0x3A] = CAPSLOCK,
+	[0x45] = NUMLOCK,
+	[0x46] = SCROLLLOCK
+};
+
+static uint8_t normalmap[256] =
+{
+	NO,   0x1B, '1',  '2',  '3',  '4',  '5',  '6',	// 0x00
+	'7',  '8',  '9',  '0',  '-',  '=',  '\b', '\t',
+	'q',  'w',  'e',  'r',  't',  'y',  'u',  'i',	// 0x10
+	'o',  'p',  '[',  ']',  '\n', NO,   'a',  's',
+	'd',  'f',  'g',  'h',  'j',  'k',  'l',  ';',	// 0x20
+	'\'', '`',  NO,   '\\', 'z',  'x',  'c',  'v',
+	'b',  'n',  'm',  ',',  '.',  '/',  NO,   '*',	// 0x30
+	NO,   ' ',  NO,   NO,   NO,   NO,   NO,   NO,
+	NO,   NO,   NO,   NO,   NO,   NO,   NO,   '7',	// 0x40
+	'8',  '9',  '-',  '4',  '5',  '6',  '+',  '1',
+	'2',  '3',  '0',  '.',  NO,   NO,   NO,   NO,	// 0x50
+	[0xC7] = KEY_HOME,	      [0x9C] = '\n' /*KP_Enter*/,
+	[0xB5] = '/' /*KP_Div*/,      [0xC8] = KEY_UP,
+	[0xC9] = KEY_PGUP,	      [0xCB] = KEY_LF,
+	[0xCD] = KEY_RT,	      [0xCF] = KEY_END,
+	[0xD0] = KEY_DN,	      [0xD1] = KEY_PGDN,
+	[0xD2] = KEY_INS,	      [0xD3] = KEY_DEL
+};
+
+static uint8_t shiftmap[256] =
+{
+	NO,   033,  '!',  '@',  '#',  '$',  '%',  '^',	// 0x00
+	'&',  '*',  '(',  ')',  '_',  '+',  '\b', '\t',
+	'Q',  'W',  'E',  'R',  'T',  'Y',  'U',  'I',	// 0x10
+	'O',  'P',  '{',  '}',  '\n', NO,   'A',  'S',
+	'D',  'F',  'G',  'H',  'J',  'K',  'L',  ':',	// 0x20
+	'"',  '~',  NO,   '|',  'Z',  'X',  'C',  'V',
+	'B',  'N',  'M',  '<',  '>',  '?',  NO,   '*',	// 0x30
+	NO,   ' ',  NO,   NO,   NO,   NO,   NO,   NO,
+	NO,   NO,   NO,   NO,   NO,   NO,   NO,   '7',	// 0x40
+	'8',  '9',  '-',  '4',  '5',  '6',  '+',  '1',
+	'2',  '3',  '0',  '.',  NO,   NO,   NO,   NO,	// 0x50
+	[0xC7] = KEY_HOME,	      [0x9C] = '\n' /*KP_Enter*/,
+	[0xB5] = '/' /*KP_Div*/,      [0xC8] = KEY_UP,
+	[0xC9] = KEY_PGUP,	      [0xCB] = KEY_LF,
+	[0xCD] = KEY_RT,	      [0xCF] = KEY_END,
+	[0xD0] = KEY_DN,	      [0xD1] = KEY_PGDN,
+	[0xD2] = KEY_INS,	      [0xD3] = KEY_DEL
+};
+
+#define C(x) (x - '@')
+
+static uint8_t ctlmap[256] =
+{
+	NO,      NO,      NO,      NO,      NO,      NO,      NO,      NO,
+	NO,      NO,      NO,      NO,      NO,      NO,      NO,      NO,
+	C('Q'),  C('W'),  C('E'),  C('R'),  C('T'),  C('Y'),  C('U'),  C('I'),
+	C('O'),  C('P'),  NO,      NO,      '\r',    NO,      C('A'),  C('S'),
+	C('D'),  C('F'),  C('G'),  C('H'),  C('J'),  C('K'),  C('L'),  NO,
+	NO,      NO,      NO,      C('\\'), C('Z'),  C('X'),  C('C'),  C('V'),
+	C('B'),  C('N'),  C('M'),  NO,      NO,      C('/'),  NO,      NO,
+	[0x97] = KEY_HOME,
+	[0xB5] = C('/'),		[0xC8] = KEY_UP,
+	[0xC9] = KEY_PGUP,		[0xCB] = KEY_LF,
+	[0xCD] = KEY_RT,		[0xCF] = KEY_END,
+	[0xD0] = KEY_DN,		[0xD1] = KEY_PGDN,
+	[0xD2] = KEY_INS,		[0xD3] = KEY_DEL
+};
+
+static uint8_t *charcode[4] = {
+	normalmap,
+	shiftmap,
+	ctlmap,
+	ctlmap
+};
+
+/*
+ * Get data from the keyboard.  If we finish a character, return it.  Else 0.
+ * Return -1 if no data.
+ */
+static int
+kbd_proc_data(void)
+{
+	int c;
+	uint8_t stat, data;
+	static uint32_t shift;
+
+	stat = inb(KBSTATP);
+	if ((stat & KBS_DIB) == 0)
+		return -1;
+	// Ignore data from mouse.
+	if (stat & KBS_TERR)
+		return -1;
+
+	data = inb(KBDATAP);
+
+	if (data == 0xE0) {
+		// E0 escape character
+		shift |= E0ESC;
+		return 0;
+	} else if (data & 0x80) {
+		// Key released
+		data = (shift & E0ESC ? data : data & 0x7F);
+		shift &= ~(shiftcode[data] | E0ESC);
+		return 0;
+	} else if (shift & E0ESC) {
+		// Last character was an E0 escape; or with 0x80
+		data |= 0x80;
+		shift &= ~E0ESC;
+	}
+
+	shift |= shiftcode[data];
+	shift ^= togglecode[data];
+
+	c = charcode[shift & (CTL | SHIFT)][data];
+	if (shift & CAPSLOCK) {
+		if ('a' <= c && c <= 'z')
+			c += 'A' - 'a';
+		else if ('A' <= c && c <= 'Z')
+			c += 'a' - 'A';
+	}
+
+	// Process special keys
+	// Ctrl-Alt-Del: reboot
+	if (!(~shift & (CTL | ALT)) && c == KEY_DEL) {
+		cprintf("Rebooting!\n");
+		outb(0x92, 0x3); // courtesy of Chris Frost
+	}
+
+	return c;
+}
+
+void
+kbd_intr(void)
+{
+	cons_intr(kbd_proc_data);
+}
+
+static void
+kbd_init(void)
+{
+}
+
+
+
+/***** General device-independent console code *****/
+// Here we manage the console input buffer,
+// where we stash characters received from the keyboard or serial port
+// whenever the corresponding interrupt occurs.
+
+#define CONSBUFSIZE 512
+
+static struct {
+	uint8_t buf[CONSBUFSIZE];
+	uint32_t rpos;
+	uint32_t wpos;
+} cons;
+
+// called by device interrupt routines to feed input characters
+// into the circular console input buffer.
+static void
+cons_intr(int (*proc)(void))
+{
+	int c;
+
+	while ((c = (*proc)()) != -1) {
+		if (c == 0)
+			continue;
+		cons.buf[cons.wpos++] = c;
+		if (cons.wpos == CONSBUFSIZE)
+			cons.wpos = 0;
+	}
+}
+
+// return the next input character from the console, or 0 if none waiting
+int
+cons_getc(void)
+{
+	int c;
+
+	// poll for any pending input characters,
+	// so that this function works even when interrupts are disabled
+	// (e.g., when called from the kernel monitor).
+	serial_intr();
+	kbd_intr();
+
+	// grab the next character from the input buffer.
+	if (cons.rpos != cons.wpos) {
+		c = cons.buf[cons.rpos++];
+		if (cons.rpos == CONSBUFSIZE)
+			cons.rpos = 0;
+		return c;
+	}
+	return 0;
+}
+
+// output a character to the console
+static void
+cons_putc(int c)
+{
+	serial_putc(c);
+	lpt_putc(c);
+	cga_putc(c);
+}
+
+// initialize the console devices
+void
+cons_init(void)
+{
+    // 对键盘 显示器等东西进行初始化
+	cga_init();
+	kbd_init();
+	serial_init();
+
+	if (!serial_exists)
+		cprintf("Serial port does not exist!\n");
+}
+
+
+// `High'-level console I/O.  Used by readline and cprintf.
+
+void
+cputchar(int c)
+{
+	cons_putc(c);
+}
+
+int
+getchar(void)
+{
+	int c;
+
+	while ((c = cons_getc()) == 0)
+		/* do nothing */;
+	return c;
+}
+
+int
+iscons(int fdnum)
+{
+	// used by readline
+	return 1;
+}
+```
+
+
+
+```c
+// lib/printfmt.c
+// Stripped-down primitive printf-style formatting routines,
+// used in common by printf, sprintf, fprintf, etc.
+// This code is also used by both the kernel and user programs.
+
+#include <inc/types.h>
+#include <inc/stdio.h>
+#include <inc/string.h>
+#include <inc/stdarg.h>
+#include <inc/error.h>
+
+/*
+ * Space or zero padding and a field width are supported for the numeric
+ * formats only.
+ *
+ * The special format %e takes an integer error code
+ * and prints a string describing the error.
+ * The integer may be positive or negative,
+ * so that -E_NO_MEM and E_NO_MEM are equivalent.
+ */
+
+static const char * const error_string[MAXERROR] =
+{
+	[E_UNSPECIFIED]	= "unspecified error",
+	[E_BAD_ENV]	= "bad environment",
+	[E_INVAL]	= "invalid parameter",
+	[E_NO_MEM]	= "out of memory",
+	[E_NO_FREE_ENV]	= "out of environments",
+	[E_FAULT]	= "segmentation fault",
+};
+
+/*
+ * Print a number (base <= 16) in reverse order,
+ * using specified putch function and associated pointer putdat.
+ */
+static void
+printnum(void (*putch)(int, void*), void *putdat,
+	 unsigned long long num, unsigned base, int width, int padc)
+{
+    // 递归传入
+	// first recursively print all preceding (more significant) digits
+	if (num >= base) {
+		printnum(putch, putdat, num / base, base, width - 1, padc);
+	} else {
+		// print any needed pad characters before first digit
+		while (--width > 0)
+			putch(padc, putdat);
+	}
+
+	// then print this (the least significant) digit
+    // 打印余数
+	putch("0123456789abcdef"[num % base], putdat);
+}
+
+// Get an unsigned int of various possible sizes from a varargs list,
+// depending on the lflag parameter.
+static unsigned long long
+getuint(va_list *ap, int lflag)
+{
+	if (lflag >= 2)
+		return va_arg(*ap, unsigned long long);
+	else if (lflag)
+		return va_arg(*ap, unsigned long);
+	else
+		return va_arg(*ap, unsigned int);
+}
+
+// Same as getuint but signed - can't use getuint
+// because of sign extension
+static long long
+getint(va_list *ap, int lflag)
+{
+	if (lflag >= 2)
+		return va_arg(*ap, long long);
+	else if (lflag)
+		return va_arg(*ap, long);
+	else
+		return va_arg(*ap, int);
+}
+
+
+// Main function to format and print a string.
+void printfmt(void (*putch)(int, void*), void *putdat, const char *fmt, ...);
+
+void
+vprintfmt(void (*putch)(int, void*), void *putdat, const char *fmt, va_list ap)
+{
+	register const char *p;
+	register int ch, err;
+	unsigned long long num;
+	int base, lflag, width, precision, altflag;
+	char padc;
+
+	while (1) {
+        // 如果没有遇到格式化符号的话，直接将fmt中的内容打印出来
+        // 没有考虑\n等转义字符？
+		while ((ch = *(unsigned char *) fmt++) != '%') {
+			if (ch == '\0')
+				return;
+			putch(ch, putdat);
+		}
+
+		// Process a %-escape sequence
+		padc = ' ';
+		width = -1;
+		precision = -1;
+		lflag = 0;
+		altflag = 0;
+	reswitch:
+        //读取 '%'的下一个字符
+		switch (ch = *(unsigned char *) fmt++) {
+
+		// flag to pad on the right
+        // 表示左对齐，右边填写'-'。
+		case '-':
+			padc = '-';
+			goto reswitch;
+
+		// flag to pad with 0's instead of spaces
+        // 左对齐，右边填充0.
+		case '0':
+			padc = '0';
+			goto reswitch;
+
+		// width field
+        // 设置格式化的长度
+		case '1':
+		case '2':
+		case '3':
+		case '4':
+		case '5':
+		case '6':
+		case '7':
+		case '8':
+		case '9':
+			for (precision = 0; ; ++fmt) {
+                // 设置precision
+                // 最后break之前找到传入的precision值。
+				precision = precision * 10 + ch - '0';
+				ch = *fmt;
+				if (ch < '0' || ch > '9')
+					break;
+			}
+			goto process_precision;
+
+		case '*':
+            // 精度为第一个变长参数列表。类型为int
+			precision = va_arg(ap, int);
+			goto process_precision;
+
+		case '.':
+            // 对于精度类型，精度指定要写入的最小位数。如果写入的值比数字段，就用0填充。
+			if (width < 0)
+				width = 0;
+			goto reswitch;
+
+		case '#':
+            //与OxX说明符一起使用，会在0以外的数字前面加上0, 0x或者0X的前缀。
+			altflag = 1;
+			goto reswitch;
+
+		process_precision:
+            //如果width小于0，那么precision就是宽度，否则precision就是精度。
+			if (width < 0)
+				width = precision, precision = -1;
+			goto reswitch;
+
+		// long flag (doubled for long long)
+        // 表示是long类型
+		case 'l':
+			lflag++;
+			goto reswitch;
+
+		// character
+        // 输出字符串
+		case 'c':
+			putch(va_arg(ap, int), putdat);
+			break;
+
+		// error message
+		case 'e':
+            // 获得error message的数字编号，这里和普通的c辨准库有所不同
+            // c标准库中，e应该是科学计数法的写法。
+			err = va_arg(ap, int);
+			if (err < 0)
+				err = -err;
+            // 如果找不到错误信息，那么久直接打印错误编号。
+			if (err >= MAXERROR || (p = error_string[err]) == NULL)
+				printfmt(putch, putdat, "error %d", err);
+			else
+            // 如果找到的话，打印找到的字符串
+				printfmt(putch, putdat, "%s", p);
+			break;
+
+		// string
+		case 's':
+            // 把参数列表作为字符串解释。
+			if ((p = va_arg(ap, char *)) == NULL)
+				p = "(null)";
+            // 计算输出之后需要填充的数量
+			if (width > 0 && padc != '-')
+				for (width -= strnlen(p, precision); width > 0; width--)
+					putch(padc, putdat);
+			for (; (ch = *p++) != '\0' && (precision < 0 || --precision >= 0); width--)
+				if (altflag && (ch < ' ' || ch > '~'))
+					putch('?', putdat);
+				else
+					putch(ch, putdat);
+			for (; width > 0; width--)
+				putch(' ', putdat);
+			break;
+
+		// (signed) decimal
+		case 'd':
+            // 获取数字，传入lflag，表示是不是long int
+			num = getint(&ap, lflag);
+			if ((long long) num < 0) {
+                // 打印一个负号
+				putch('-', putdat);
+                // 数字变正，便于处理。
+				num = -(long long) num;
+			}
+			base = 10;
+			goto number;
+
+		// unsigned decimal
+		case 'u':
+			num = getuint(&ap, lflag);
+			base = 10;
+			goto number;
+
+		// (unsigned) octal
+		case 'o':
+			// Replace this with your code.
+			putch('0', putdat);
+			num = getuint(&ap, lflag);
+            base = 8;
+			goto number;
+
+		// pointer
+		case 'p':
+            // 打印指针地址
+			putch('0', putdat);
+			putch('x', putdat);
+			num = (unsigned long long)
+				(uintptr_t) va_arg(ap, void *);
+			base = 16;
+			goto number;
+
+		// (unsigned) hexadecimal
+		case 'x':
+        // 16进制
+			num = getuint(&ap, lflag);
+			base = 16;
+		number:
+			printnum(putch, putdat, num, base, width, padc);
+			break;
+
+		// escaped '%' character
+		case '%':
+			putch(ch, putdat);
+			break;
+
+		// unrecognized escape sequence - just print it literally
+		default:
+            // 如果不在转义列表里面，正常打印
+			putch('%', putdat);
+			for (fmt--; fmt[-1] != '%'; fmt--)
+				/* do nothing */;
+			break;
+		}
+	}
+}
+
+void
+printfmt(void (*putch)(int, void*), void *putdat, const char *fmt, ...)
+{
+	va_list ap;
+
+	va_start(ap, fmt);
+    //这里的fmt就和之前的不一样，只有占位符
+	vprintfmt(putch, putdat, fmt, ap);
+	va_end(ap);
+}
+
+struct sprintbuf {
+	char *buf;
+    // end of buff
+	char *ebuf;
+	int cnt;
+};
+
+static void
+sprintputch(int ch, struct sprintbuf *b)
+{
+    // 打印一个字母
+	b->cnt++;
+	if (b->buf < b->ebuf)
+		*b->buf++ = ch;
+}
+
+int
+vsnprintf(char *buf, int n, const char *fmt, va_list ap)
+{
+	struct sprintbuf b = {buf, buf+n-1, 0};
+
+	if (buf == NULL || n < 1)
+		return -E_INVAL;
+
+	// print the string to the buffer
+	vprintfmt((void*)sprintputch, &b, fmt, ap);
+
+	// null terminate the buffer
+	*b.buf = '\0';
+
+	return b.cnt;
+}
+
+int
+snprintf(char *buf, int n, const char *fmt, ...)
+{
+	va_list ap;
+	int rc;
+
+	va_start(ap, fmt);
+	rc = vsnprintf(buf, n, fmt, ap);
+	va_end(ap);
+
+	return rc;
+}
+```
+
+
+
+```c
+// kern/printf.c
+// Simple implementation of cprintf console output for the kernel,
+// based on printfmt() and the kernel console's cputchar().
+
+#include <inc/types.h>
+#include <inc/stdio.h>
+#include <inc/stdarg.h>
+
+
+static void
+putch(int ch, int *cnt)
+{
+    // 打印一个字符
+	cputchar(ch);
+	*cnt++;
+}
+
+int
+vcprintf(const char *fmt, va_list ap)
+{
+	int cnt = 0;
+	// 传入一个putchar函数，count， fmt和可变列表
+	vprintfmt((void*)putch, &cnt, fmt, ap);
+    // 返回打印了多少字符。
+	return cnt;
+}
+
+int
+cprintf(const char *fmt, ...)
+{
+    // 定义一个va_list指针。
+	va_list ap;
+	int cnt;
+	// 然后对改ap进行初始化，让他指向可变参数表里面的第一个参数，第一个参数是ap本身，
+    // 第二个参数是变参量表之前紧挨的一个变量，即"..."之前的那个参数。在这里是fmt
+	va_start(ap, fmt);
+    // 获取参数应该是调用va_arg，在这里他直接将ap作为参数传入了vcprintf之中，
+	cnt = vcprintf(fmt, ap);
+    // 在获取所有的参数后，我们需要将这个ap指针关掉，以免发生危险，方法是调用va_end
+    // 它将输入的参数ap置为NULL
+	va_end(ap);
+
+	return cnt;
+}
+```
+
+关于以上代码，有几个需要用到的知识，一是个CRT一个是Serial
+
+>Serial ports are a legacy communications port which has pretty much been succeeded by [USB](https://wiki.osdev.org/USB) and other modern communications technology. 
+
+简单的来说就是一个串行接口，可以用于两个终端之间的数据传输，在这里既是计算机和CRT之间的数据传输。
+
+然后是CRT,也就是显示器的接口了。
+
