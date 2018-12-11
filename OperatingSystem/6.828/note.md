@@ -2084,3 +2084,103 @@ cprintf(const char *fmt, ...)
 
 然后是CRT,也就是显示器的接口了。
 
+。。。。后面还有一些需要回答的问题：
+
+> 描述printf.c和console.c之间的接口，特别是console提供了哪些接口，这些接口被用在了printf.c的哪些地方。
+
+vcprintf调用vprintfmt，vprintfmt调用putch，putch调用cputchar,cputchar即是在console中提供的接口。
+
+>描述一下console.c中的代码的作用：
+>
+>```c
+>1 if (crt_pos >= CRT_SIZE) {
+>2              int i;
+>3              memmove(crt_buf, crt_buf + CRT_COLS, (CRT_SIZE - CRT_COLS) * sizeof(uint16_t));
+>4              for (i = CRT_SIZE - CRT_COLS; i < CRT_SIZE; i++)
+>5                      crt_buf[i] = 0x0700 | ' ';
+>6              crt_pos -= CRT_COLS;
+>7      }
+>```
+
+在console.h中找到必要的定义
+
+```c
+#define CRT_ROWS 25
+#define CRT_COLS 80
+#define CRT_SIZE (CRT_ROEW * CRT_COLS)
+```
+
+简单来说就是将CRT中的第一行擦去，然后将所有行上移一行。这个0x0700是一个掩码，如果没有输入东西，就使用白底黑色，但是目测第四行是利用空格将最后一行填充。
+
+>1. For the following questions you might wish to consult the notes for Lecture 2. These notes cover GCC's calling convention on the x86.
+>
+>   Trace the execution of the following code step-by-step:
+>
+>   ```
+>   int x = 1, y = 3, z = 4;
+>   cprintf("x %d, y %x, z %d\n", x, y, z);
+>   ```
+>
+>   - In the call to `cprintf()`, to what does `fmt` point? To what does `ap` point?
+>   - List (in order of execution) each call to `cons_putc`, `va_arg`, and `vcprintf`. For `cons_putc`, list its argument as well. For `va_arg`, list what `ap` points to before and after the call. For `vcprintf` list the values of its two arguments.
+
+我将这个函数放入i386_init这个函数中，然后进行单步调试。
+
+```c
+cprintf (fmt=0xf0101872 "x %d, y %x, z %d\n") at kern/printf.c:31
+// fmt是一个指针，指向fmt字符串。
+vcprintf (fmt=0xf0101872 "x %d, y %x, z %d\n", ap=0xf010ffd4 "\001")
+// ap是一个地址，存储了传入进去的可变变量。0xf
+// x/3wd 0xf010ffd4
+// 0xf010ffd4:	1	3	4
+// 正是我们传进去的3个参数
+```
+
+剩下的就没啥意思了，都一样，跳过。
+
+>Run the following code.
+>
+>```
+>    unsigned int i = 0x00646c72;
+>    cprintf("H%x Wo%s", 57616, &i);
+>```
+>
+>What is the output? Explain how this output is arrived at in the step-by-step manner of the previous exercise. 
+>
+>Here's an ASCII table
+>
+> that maps bytes to characters.
+>
+>The output depends on that fact that the x86 is little-endian. If the x86 were instead big-endian what would you set `i` to in order to yield the same output? Would you need to change `57616` to a different value?
+
+首先，打印出来的是 He110 World。如果他是大端法的话，输出是He110, Wodrl。57616不用换。
+
+ >1. In the following code, what is going to be printed after
+ >
+ >    
+ >
+ >   ```
+ >   'y='
+ >   ```
+ >
+ >   ? (note: the answer is not a specific value.) Why does this happen?
+ >
+ >   ```CQL
+ >       cprintf("x=%d y=%d", 3);
+ >   ```
+
+首先，这TM是一个UB。显示y=1600。
+
+通过gdb调试:
+
+```c
+vcprintf (fmt=0xf0101872 "x=%d, y=%d\n", ap=0xf010ffe4 "\003")
+// x/2wd 0xf010ffe4
+// 3 1600
+```
+
+Bingo.
+
+>1. Let's say that GCC changed its calling convention so that it pushed arguments on the stack in declaration order, so that the last argument is pushed last. How would you have to change `cprintf` or its interface so that it would still be possible to pass it a variable number of arguments?
+
+所有的参数都倒过来，那么实现上是会难很多。。。。
