@@ -1373,7 +1373,7 @@ static void
 cga_putc(int c)
 {
 	// if no attribute given, then use black on white
-    // 将字符写入buff
+    // 如果没有颜色控制信息，使用黑底白字
 	if (!(c & ~0xFF))
 		c |= 0x0700;
 
@@ -2184,3 +2184,16 @@ Bingo.
 >1. Let's say that GCC changed its calling convention so that it pushed arguments on the stack in declaration order, so that the last argument is pushed last. How would you have to change `cprintf` or its interface so that it would still be possible to pass it a variable number of arguments?
 
 所有的参数都倒过来，那么实现上是会难很多。。。。
+
+>challenge 把consol的颜色改了
+
+代码应该是在下面的地方：
+
+```c
+if (!(c & ~0xFF))  
+	c |= 0x0700
+```
+
+我将0x0700改成了0x0100，就变成了黑底绿字。
+
+应该是使用c的高8位进行设置，文档中有一个表格，但是和我缩出现的颜色对不上，暂时放弃。
