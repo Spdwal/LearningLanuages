@@ -1929,7 +1929,6 @@ vprintfmt(void (*putch)(int, void*), void *putdat, const char *fmt, va_list ap)
 		// (unsigned) octal
 		case 'o':
 			// Replace this with your code.
-			putch('0', putdat);
 			num = getuint(&ap, lflag);
             base = 8;
 			goto number;
@@ -2350,3 +2349,42 @@ push %eax             # 将参数放入栈中传递     0xf010ffc0
 ```
 
 大概能看出来，最后一列是传入的参数。每一个栈都分配了4*8，也就是0x20的空间。第一列保存了调用栈的地址链。其中还保存了之前的x的值。但是还有一些不知道哪里来的沙雕数据，真不知道是为了什么浪费这些空间。此题结束。
+
+## Exercise 11
+
+__书写一个函数可以以如下形式打印信息：__
+
+```
+Stack backtrace:
+  ebp f0109e58  eip f0100a62  args 00000001 f0109e80 f0109e98 f0100ed2 00000031
+  ebp f0109ed8  eip f01000d6  args 00000000 00000000 f0100058 f0109f28 00000061
+  ...
+```
+
+每一扛需要一个ebp。 一个eip和args。ebp中存的是stack中的base pointe。eip值是函数的返回地址。这个返回地址指向的是call的后一个指令的地址。args里面存的是函数的前5个参数的的地址。如果函数传入的指令少于5个，那么并不是所有的参数都会被使用。第一行是调用当前函数的ebp，eip等等，第二行是调用此函数的父函数的值，以此类推。我们需要打印出所有的栈帧。
+
+在xv6中提供了一个函数read_ebp()可以获得ebp的值，但是在使用它的时候要确定它并没有在修改栈指针之前调用它，如果是的话，会导致结果错误，这需要查看汇编代码来确定这一点。
+
+```c
+
+int
+mon_backtrace(int argc, char **argv, struct Trapframe *tf)
+{
+	// Your code here.
+	cprintf("Stack backtrace:\n");
+	uint32_t *ebp = (uint32_t*)read_ebp();
+	while(ebp != NULL){
+		uint32_t eip = *(ebp + 1);
+		cprintf("  ebp %08x  eip %08x  args", ebp, eip);
+		for(int i = 2; i <= 6; ++i){
+			cprintf("  %08x", *(ebp + i));
+		}
+		cprintf("\n");
+		ebp = (uint32_t*) *ebp;
+	}
+	return 0;
+}
+
+```
+
+经过查看汇编，没有问题，完毕。
