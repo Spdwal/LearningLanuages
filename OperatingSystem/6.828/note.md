@@ -2197,3 +2197,71 @@ if (!(c & ~0xFF))
 我将0x0700改成了0x0100，就变成了黑底绿字。
 
 应该是使用c的高8位进行设置，文档中有一个表格，但是和我缩出现的颜色对不上，暂时放弃。
+
+## Exercise 9
+
+__判断操作系统内核是从哪条指令开始初始化栈的，并且找到栈所处的内存中的位置。内核是如何给栈保存内存空间的，栈指针又是指向被保存的空间的哪一段。__
+
+首先经过对之前boot loader代码的观察可以发现，并有有关初始化栈指针的代码，在boot loader的最后调用了entry()，接下来我们观察entry.S。在其中找到这样一句话
+
+```c
+# Set the stack pointer
+movl $(bootstacktop), %esp
+```
+
+然后我们进入gdb调试，非常奇怪的是，为什么我打断点在entry处之后，会直接无限continue。只能从0x7d71开始打断点。
+
+```nasm
+0x10000c: movw $0x1234, 0x472                       # 设置热启动
+0x100015: mov  $0x110000, %eax                      # 找到entry_pgdir的物理地址。
+0x10001a: mov  %eax, %cr3                           # 设置cr3寄存器
+# 打开分页程序
+0x100020: mov  %cr0, %eax
+0x100020: or $0x80010001, %eax
+0x100025: mov  %eax, %cr0
+# 此时paging已经开启了，但是我们还是运行在低地址中，
+# 然后我们直接利用jmp，跳转到重定向的地址。
+0x100028: mov $f010002f, %eax
+0x10002d: jmp *%eax
+relocated:
+# 将ebp置0，这样的话如果我们调试c代码，栈会崩溃，这是防止出现一些未定义行为。
+0xf010002f: mov $0x0, %ebp
+# 设置栈指针
+0xf0100034: movl 0xf0110000, %esp        
+```
+
+答案很明确了，栈位于虚拟地址0xf0110000处。实际地址0x00110000处。
+
+在这里将entry_pgdir的代码摘录如下
+
+```c
+__attribute__((__aligned__(PGSIZE)))
+    // NPDENTRIES = 1024
+    pde_t entry_pgdir[NPDENTRIES] = {
+    // KERNBASE = 0x80000000
+    // 将虚拟地址的[0 4MB) 映射到 物理地址的[0, 4MB)，
+    // 此时能取到的entry_pagtable的地址，只是虚拟地址了，将它 - KERNBASE，取得它的物理地址。
+    // 取得之后还需要将它构造完毕。因为此时此地址只有0,所以可以直接用+PTE_P的操作
+    [0] = ((uintptr_t) entry_pgtable - KERNBASE) + PTE_P,
+    // PDXSHIFT = 22 KERNBASE >> 22 = 1024
+    [KERNBASE>>PDXSHIFT] = ((uintptr_t)entry_pgtable - KERNBASE) + PTE_P + PTE_W
+};
+```
+
+这里声明了一个page directory  entry table。它是由一系列page directory entry组成的。
+
+> The page table address field represents the physical address of the page table that manages the four megabytes at that point. 
+
+> In each page table, as it is, there are also 1024 entries. These are called page table entries, and are **very** similar to page directory entries.
+
+实际上他们组成了两个二级分页系统，此时的entry_pgdir中的第一项指向了entry_pgtable的物理地址。具体的内存管理，等Lab2再详细说。
+
+在entry.S的最后，找到了bootstacktop，还有一个KTKSIZE的声明
+
+```c
+#define KSTKSIZE(8*PGSIZE)
+```
+
+从这里可以看出来，bootstacktop到bootstack之间有着KSTKSIZE的连续空间，也就是8个页表的空间，然后地址空间往下走就是bootstack的地址。一个PGSIZE就是4kb，所以这个栈就是32kb的大小。所以栈的空间为：
+
+0xf0108000-0xf0110000这一段地址，而实际的地址为0x00108000-0x00110000的物理地址中。堆栈指针指向保留区域的最高地址。
