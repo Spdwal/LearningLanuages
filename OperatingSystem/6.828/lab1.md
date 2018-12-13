@@ -2365,6 +2365,10 @@ Stack backtrace:
 
 在xv6中提供了一个函数read_ebp()可以获得ebp的值，但是在使用它的时候要确定它并没有在修改栈指针之前调用它，如果是的话，会导致结果错误，这需要查看汇编代码来确定这一点。
 
+从之前的代码可以知道：
+
+ebp指向的地址，由低位向高位依次是：之前的ebp的值，eip的值，依次5个参数的值。所以代码编写如下：
+
 ```c
 
 int
@@ -2388,3 +2392,474 @@ mon_backtrace(int argc, char **argv, struct Trapframe *tf)
 ```
 
 经过查看汇编，没有问题，完毕。
+
+## Exercise 12
+
+__为每个eip打印函数名，源文件名，和行数字。__
+
+在debug info_eip函数中，有一个\__STAB\_*，它在哪里，他是干什么的？我们首先对它进行观察：
+
+首先在/kern/kernel.d中找到stab
+
+```c
+	/* Include debugging information in kernel memory */
+	.stab : {
+		PROVIDE(__STAB_BEGIN__ = .);
+		*(.stab);
+		PROVIDE(__STAB_END__ = .);
+		BYTE(0)		/* Force the linker to allocate space
+				   for this section */
+	}
+
+	.stabstr : {
+		PROVIDE(__STABSTR_BEGIN__ = .);
+		*(.stabstr);
+		PROVIDE(__STABSTR_END__ = .);
+		BYTE(0)		/* Force the linker to allocate space
+				   for this section */
+	}
+```
+
+__STAB\_*是指定一个空间，来存放调试信息。
+
+命令 objdump -h obj/kern/kernel可以得到：
+
+```
+obj/kern/kernel:     file format elf32-i386
+
+Sections:
+Idx Name          Size      VMA       LMA       File off  Algn
+  0 .text         0000185f  f0100000  00100000  00001000  2**4
+                  CONTENTS, ALLOC, LOAD, READONLY, CODE
+  1 .rodata       00000748  f0101860  00101860  00002860  2**5
+                  CONTENTS, ALLOC, LOAD, READONLY, DATA
+  2 .stab         00004309  00101fa8  00002fa8  2**2
+                  CONTENTS, ALLOC, LOAD, READONLY, DATA
+  3 .stabstr      000019c9  f01062b1  001062b1  000072b1  2**0
+                  CONTENTS, ALLOC, LOAD, READONLY, DATA
+  4 .data         0000a300  f0108000  00108000  00009000  2**12
+                  CONTENTS, ALLOC, LOAD, DATA
+  5 .bss          00000648  f0112300  00112300  00013300  2**5
+                  CONTENTS, ALLOC, LOAD, DATA
+  6 .comment      0000002c  00000000  00000000  00013948  2**0
+                  CONTENTS, READONLY
+```
+
+由上述输出可以得到.stab .stabstr的位置。
+
+.stab位于 0xf0101fa8~0xf01062b0，大小为0x4309
+
+.stabstr位于0xf01062b1~0xf0107fff，大小为0x19c9
+
+objdump -G obj/kern/kernel
+
+```
+obj/kern/kernel:     file format elf32-i386
+
+Contents of .stab section:
+
+Symnum n_type n_othr n_desc n_value  n_strx String
+
+-1     HdrSym 0      1429   000019c8 1     
+0      SO     0      0      f0100000 1      {standard input}
+1      SOL    0      0      f010000c 18     kern/entry.S
+2      SLINE  0      44     f010000c 0      
+3      SLINE  0      57     f0100015 0      
+4      SLINE  0      58     f010001a 0      
+5      SLINE  0      60     f010001d 0      
+6      SLINE  0      61     f0100020 0      
+7      SLINE  0      62     f0100025 0      
+8      SLINE  0      67     f0100028 0      
+9      SLINE  0      68     f010002d 0      
+10     SLINE  0      74     f010002f 0      
+11     SLINE  0      77     f0100034 0      
+12     SLINE  0      80     f0100039 0      
+13     SLINE  0      83     f010003e 0      
+14     SO     0      2      f0100040 31     kern/entrypgdir.c
+15     OPT    0      0      00000000 49     gcc2_compiled.
+16     LSYM   0      0      00000000 64     int:t(0,1)=r(0,1);-2147483648;2147483647;
+17     LSYM   0      0      00000000 106    char:t(0,2)=r(0,2);0;127;
+18     LSYM   0      0      00000000 132    long int:t(0,3)=r(0,3);-2147483648;2147483647;
+19     LSYM   0      0      00000000 179    unsigned int:t(0,4)=r(0,4);0;4294967295;
+20     LSYM   0      0      00000000 220    long unsigned int:t(0,5)=r(0,5);0;4294967295;
+21     LSYM   0      0      00000000 266    __int128:t(0,6)=r(0,6);0;-1;
+22     LSYM   0      0      00000000 295    __int128 unsigned:t(0,7)=r(0,7);0;-1;
+23     LSYM   0      0      00000000 333    long long int:t(0,8)=r(0,8);-9223372036854775808;9223372036854775807;
+24     LSYM   0      0      00000000 403    long long unsigned int:t(0,9)=r(0,9);0;-1;
+25     LSYM   0      0      00000000 446    short int:t(0,10)=r(0,10);-32768;32767;
+26     LSYM   0      0      00000000 486    short unsigned int:t(0,11)=r(0,11);0;65535;
+27     LSYM   0      0      00000000 530    signed char:t(0,12)=r(0,12);-128;127;
+28     LSYM   0      0      00000000 568    unsigned char:t(0,13)=r(0,13);0;255;
+etc.....
+```
+
+gcc -pipe -nostdinc -O2 -fno-builtin -I. -MD -Wall -Wno-format -DJOS_KERNEL -gstabs -c -S kern/init.c
+
+之后查看 init.s，得到如下数据。
+
+```
+	.file	"init.c"
+	.stabs	"kern/init.c",100,0,2,.Ltext0
+	.text
+.Ltext0:
+	.stabs	"gcc2_compiled.",60,0,0,0
+	.stabs	"int:t(0,1)=r(0,1);-2147483648;2147483647;",128,0,0,0
+	.stabs	"char:t(0,2)=r(0,2);0;127;",128,0,0,0
+	.stabs	"long int:t(0,3)=r(0,3);-9223372036854775808;9223372036854775807;",128,0,0,0
+	.stabs	"unsigned int:t(0,4)=r(0,4);0;4294967295;",128,0,0,0
+	.stabs	"long unsigned int:t(0,5)=r(0,5);0;-1;",128,0,0,0
+	.stabs	"__int128:t(0,6)=r(0,6);0;-1;",128,0,0,0
+	.stabs	"__int128 unsigned:t(0,7)=r(0,7);0;-1;",128,0,0,0
+	.stabs	"long long int:t(0,8)=r(0,8);-9223372036854775808;9223372036854775807;",128,0,0,0
+	.stabs	"long long unsigned int:t(0,9)=r(0,9);0;-1;",128,0,0,0
+	.stabs	"short int:t(0,10)=r(0,10);-32768;32767;",128,0,0,0
+	.stabs	"short unsigned int:t(0,11)=r(0,11);0;65535;",128,0,0,0
+	.stabs	"signed char:t(0,12)=r(0,12);-128;127;",128,0,0,0
+	.stabs	"unsigned char:t(0,13)=r(0,13);0;255;",128,0,0,0
+	.stabs	"float:t(0,14)=r(0,1);4;0;",128,0,0,0
+	.stabs	"double:t(0,15)=r(0,1);8;0;",128,0,0,0
+	.stabs	"long double:t(0,16)=r(0,1);16;0;",128,0,0,0
+	.stabs	"_Float32:t(0,17)=r(0,1);4;0;",128,0,0,0
+	.stabs	"_Float64:t(0,18)=r(0,1);8;0;",128,0,0,0
+	.stabs	"_Float128:t(0,19)=r(0,1);16;0;",128,0,0,0
+	.stabs	"_Float32x:t(0,20)=r(0,1);8;0;",128,0,0,0
+	.stabs	"_Float64x:t(0,21)=r(0,1);16;0;",128,0,0,0
+```
+
+确认bootloader也将stab的符号表加载进了内存之中。在之前的输出中确定的.stab的地址，然后利用gdb进行调试。
+
+```
+(gdb) x/50s 0xf01062b1
+0xf01062b1:	""
+0xf01062b2:	"{standard input}"
+0xf01062c3:	"kern/entry.S"
+0xf01062d0:	"kern/entrypgdir.c"
+0xf01062e2:	"gcc2_compiled."
+0xf01062f1:	"int:t(0,1)=r(0,1);-2147483648;2147483647;"
+0xf010631b:	"char:t(0,2)=r(0,2);0;127;"
+0xf0106335:	"long int:t(0,3)=r(0,3);-2147483648;2147483647;"
+0xf0106364:	"unsigned int:t(0,4)=r(0,4);0;4294967295;"
+0xf010638d:	"long unsigned int:t(0,5)=r(0,5);0;4294967295;"
+0xf01063bb:	"__int128:t(0,6)=r(0,6);0;-1;"
+0xf01063d8:	"__int128 unsigned:t(0,7)=r(0,7);0;-1;"
+etc...
+```
+
+可以看到符号表已经被正常加载。
+
+stab中有4种格式化：
+
+```
+.stabs "string",type,other,desc,value
+.stabn type,other,desc,value
+.stabd type,other,desc
+.stabx "string",value,type,sdb-type
+```
+
+.stabn和stabd中，没有string，也就是n_strx field是0。
+
+other filed一般来说是没用的，可以被设置为0。
+
+.stabx中的type field是没有用的。
+
+type filed中的数字提供给每一个stab一些基础的信息，每一个type number提供了不同的stab type，并且决定了怎么解释这个stab。
+
+name filed有以下格式："name:symbol-descriptor type-information"
+
+name就是symbol的名字，可以包含::，就像c++里面一样。
+
+symbol-descriptor 可能是一个type的数字，或者是一个‘type-name=‘字符串，如果是一个type number的话，是一个已经被define的type的引用。
+
+'type-number='是一个type definition。这个数字提供了一个新的类型定义。这个type defintion可能引用别的type-number。这些数字根子等于好后面，并且被嵌套定义。type-name一般来说是一个单独的数字，但是在gcc中，一来来说会将它写成如下形式(file-number, filetype-number)，filetype-number是一个从1开始增长的数字，每当一个新的类型被define，他就会增长1。
+
+然后补全debuginfo_eip函数，插入进去一个stab_binsearch来找到地址的的linenumber。然后在在mon_backtrace中调用debuginfo_eip打印出来每一个stack frame的信息如下：
+
+```
+K> backtrace
+Stack backtrace:
+  ebp f010ff78  eip f01008ae  args 00000001 f010ff8c 00000000 f0110580 00000000
+         kern/monitor.c:143: monitor+106
+  ebp f010ffd8  eip f0100193  args 00000000 00001aac 00000660 00000000 00000000
+         kern/init.c:49: i386_init+59
+  ebp f010fff8  eip f010003d  args 00000000 00000000 0000ffff 10cf9a00 0000ffff
+         kern/entry.S:70: <unknown>+0
+```
+
+每一行打印文件名和eip地址距离函数地址的偏移。
+
+先让我们来看看debuginfo_eip函数。
+
+```c
+int
+debuginfo_eip(uintptr_t addr, struct Eipdebuginfo *info)
+{
+    /*
+    struct Stab {
+		uint32_t n_strx;	    // index into string table of name
+		uint8_t n_type;         // type of symbol
+		uint8_t n_other;        // misc info (usually empty)
+		uint16_t n_desc;        // description field
+		uintptr_t n_value;   	// value of symbol
+	};
+	
+	struct Eipdebuginfo {
+		const char *eip_file;		// Source code filename for EIP
+		int eip_line;		    	// Source code linenumber for EIP
+
+		const char *eip_fn_name;	// Name of function containing EIP
+					                //  - Note: not null terminated!
+		int eip_fn_namelen;		    // Length of function name
+		uintptr_t eip_fn_addr;		// Address of start of function
+		int eip_fn_narg;		    // Number of function arguments
+	};
+
+    */
+
+	const struct Stab *stabs, *stab_end;
+	const char *stabstr, *stabstr_end;
+	int lfile, rfile, lfun, rfun, lline, rline;
+
+	// Initialize *info
+	info->eip_file = "<unknown>";
+	info->eip_line = 0;
+	info->eip_fn_name = "<unknown>";
+	info->eip_fn_namelen = 9;
+	info->eip_fn_addr = addr;
+	info->eip_fn_narg = 0;
+
+	// Find the relevant set of stabs
+	if (addr >= ULIM) {
+		stabs = __STAB_BEGIN__;
+		stab_end = __STAB_END__;
+		stabstr = __STABSTR_BEGIN__;
+		stabstr_end = __STABSTR_END__;
+	} else {
+		// Can't search for user-level addresses yet!
+  	        panic("User address");
+	}
+
+	// String table validity checks
+    // 检查地址是否合法
+	if (stabstr_end <= stabstr || stabstr_end[-1] != 0)
+		return -1;
+
+	// Now we find the right stabs that define the function containing
+	// 'eip'.  First, we find the basic source file containing 'eip'.
+	// Then, we look in that source file for the function.  Then we look
+	// for the line number.
+
+	// Search the entire set of stabs for the source file (type N_SO).
+    // 先找到文件
+	lfile = 0;
+	rfile = (stab_end - stabs) - 1;
+	stab_binsearch(stabs, &lfile, &rfile, N_SO, addr);
+	if (lfile == 0)
+		return -1;
+
+	// Search within that file's stabs for the function definition
+	// (N_FUN).
+    // 然后找fuction定义。
+	lfun = lfile;
+	rfun = rfile;
+	stab_binsearch(stabs, &lfun, &rfun, N_FUN, addr);
+
+	if (lfun <= rfun) {
+		// stabs[lfun] points to the function name
+		// in the string table, but check bounds just in case.
+		if (stabs[lfun].n_strx < stabstr_end - stabstr)
+			info->eip_fn_name = stabstr + stabs[lfun].n_strx;
+		info->eip_fn_addr = stabs[lfun].n_value;
+		addr -= info->eip_fn_addr;
+		// Search within the function definition for the line number.
+		lline = lfun;
+		rline = rfun;
+	} else {
+		// Couldn't find function stab!  Maybe we're in an assembly
+		// file.  Search the whole file for the line number.
+		info->eip_fn_addr = addr;
+		lline = lfile;
+		rline = rfile;
+	}
+	// Ignore stuff after the colon.
+	info->eip_fn_namelen = strfind(info->eip_fn_name, ':') - info->eip_fn_name;
+
+
+	// Search within [lline, rline] for the line number stab.
+	// If found, set info->eip_line to the right line number.
+	// If not found, return -1.
+	//
+	// Hint:
+	//	There's a particular stabs type used for line numbers.
+	//	Look at the STABS documentation and <inc/stab.h> to find
+	//	which one.
+	// Your code here.
+	lline = lfun;
+    rline = rfun;
+    stab_binsearch(stabs, &lline, &rline, N_SLINE, addr);
+    if(lline < rline){
+        // 如果符合条件，那么llimit就是找到的stabs的索引。
+        info->eip_line = stabs[lline].n_desc;
+    }else{
+        return -1;
+    }
+
+	// Search backwards from the line number for the relevant filename
+	// stab.
+	// We can't just use the "lfile" stab because inlined functions
+	// can interpolate code from a different file!
+	// Such included source files use the N_SOL stab type.
+	while (lline >= lfile
+	       && stabs[lline].n_type != N_SOL
+	       && (stabs[lline].n_type != N_SO || !stabs[lline].n_value))
+		lline--;
+	if (lline >= lfile && stabs[lline].n_strx < stabstr_end - stabstr)
+		info->eip_file = stabstr + stabs[lline].n_strx;
+
+
+	// Set eip_fn_narg to the number of arguments taken by the function,
+	// or 0 if there was no containing function.
+	if (lfun < rfun)
+		for (lline = lfun + 1;
+		     lline < rfun && stabs[lline].n_type == N_PSYM;
+		     lline++)
+			info->eip_fn_narg++;
+
+	return 0;
+}
+```
+
+```c
+// stab_binsearch(stabs, region_left, region_right, type, addr)
+//
+//	Some stab types are arranged in increasing order by instruction
+//	address.  For example, N_FUN stabs (stab entries with n_type ==
+//	N_FUN), which mark functions, and N_SO stabs, which mark source files.
+//
+//	Given an instruction address, this function finds the single stab
+//	entry of type 'type' that contains that address.
+//
+//	The search takes place within the range [*region_left, *region_right].
+//	Thus, to search an entire set of N stabs, you might do:
+//
+//		left = 0;
+//		right = N - 1;     /* rightmost stab */
+//		stab_binsearch(stabs, &left, &right, type, addr);
+//
+//	The search modifies *region_left and *region_right to bracket the
+//	'addr'.  *region_left points to the matching stab that contains
+//	'addr', and *region_right points just before the next stab.  If
+//	*region_left > *region_right, then 'addr' is not contained in any
+//	matching stab.
+//
+//	For example, given these N_SO stabs:
+//		Index  Type   Address
+//		0      SO     f0100000
+//		13     SO     f0100040
+//		117    SO     f0100176
+//		118    SO     f0100178
+//		555    SO     f0100652
+//		556    SO     f0100654
+//		657    SO     f0100849
+//	this code:
+//		left = 0, right = 657;
+//		stab_binsearch(stabs, &left, &right, N_SO, 0xf0100184);
+//	will exit setting left = 118, right = 554.
+//
+static void
+stab_binsearch(const struct Stab *stabs, int *region_left, int *region_right,
+	       int type, uintptr_t addr)
+{
+	int l = *region_left, r = *region_right, any_matches = 0;
+
+	while (l <= r) {
+        // 二分
+		int true_m = (l + r) / 2, m = true_m;
+
+		// search for earliest stab with right type
+        // 先找到最早出现的type，找到这个region
+		while (m >= l && stabs[m].n_type != type)
+			m--;
+		if (m < l) {	// no match in [l, m]
+			l = true_m + 1;
+			continue;
+		}
+		// 此时stabs[m].n_type = type
+		// actual binary search
+        // 在这里进行二分搜索
+		any_matches = 1;
+		if (stabs[m].n_value < addr) {
+            //m 和 true_的值一起发生变化。
+			*region_left = m;
+			l = true_m + 1;
+		} else if (stabs[m].n_value > addr) {
+            // 和后面的addr++ 联合起来，找到region_right
+			*region_right = m - 1;
+			r = m - 1;
+		} else {
+			// exact match for 'addr', but continue loop to find
+			// *region_right
+            // 如果找到了match，但是只能确定左边的边界，还要确定右边的边界
+			*region_left = m;
+			l = m;
+            // 这一句是什么意思？为什么要修改地址的值。
+			addr++;
+		}
+	}
+
+	if (!any_matches)
+        // 如果没有找到，就吧范围确定在一个 assert会错误的值。
+		*region_right = *region_left - 1;
+	else {
+		// find rightmost region containing 'addr'
+        // 找到包含有地址的最右边的区间
+		for (l = *region_right;
+		     l > *region_left && stabs[l].n_type != type;
+		     l--)
+			/* do nothing */;
+		*region_left = l;
+	}
+}
+```
+
+最后将mon_backtrace修改如下：
+
+```c
+int
+mon_backtrace(int argc, char **argv, struct Trapframe *tf)
+{
+	// Your code here.
+	cprintf("Stack backtrace:\n");
+	uint32_t *ebp = (uint32_t*)read_ebp();
+	struct Eipdebuginfo info;
+	while(ebp != NULL){
+		uint32_t eip = *(ebp + 1);
+		cprintf("  ebp %08x  eip %08x  args", ebp, eip);
+		for(int i = 2; i <= 6; ++i){
+			cprintf("  %08x", *(ebp + i));
+		}
+		debuginfo_eip(eip, &info);
+		cprintf("\n");
+		cprintf("        ");
+		cprintf("%s:%d: ",info.eip_file, info.eip_line);
+		cprintf("%.*s", info.eip_fn_namelen, info.eip_fn_name);
+		cprintf("+%d\n", eip-(uint32_t)info.eip_fn_addr);
+		ebp = (uint32_t*) *ebp;
+	}
+	return 0;
+}
+```
+
+make grade
+
+```
+running JOS: (1.2s) 
+  printf: OK 
+  backtrace count: OK 
+  backtrace arguments: OK 
+  backtrace symbols: OK 
+  backtrace lines: OK 
+Score: 50/50
+```
+
+Lab1 结束，其实代码里面还有很多不清不楚的地方。。。。先这样吧
+
