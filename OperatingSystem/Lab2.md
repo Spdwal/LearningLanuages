@@ -212,3 +212,256 @@ page_free(struct PageInfo *pp)
 
 ## Exercise 3
 
+Gdb只可以查看QEMU的虚拟地址，但是如果我们可以查看物理地址的话，会更有帮助，qemu里有一个内置的监控器，官网是可以使用c-a c可以切换到这个监控器，但是在我的虚拟机上。。。并没有办法使用，此实验跳过。
+
+当代码在cpu上训醒开始，我们就在保护模式下运行，我们没有办法直接使用线性地址或者是物理地址，所有的内存都被解释成一个虚拟地址，并且被MMU所翻译，所以C指针指向的，其实是一个虚拟地址。
+
+JOS内核通常需要把地址按照以一种模糊的值或者整数值的形式来操纵，而不是直接解析引用，比如物理内存分配器。有时使用虚拟地址，有时使用物理地址。为了能够帮助我们记录代码，JOS源文件中的地址被区分为两种情况：
+
+　　uintptr_t -- 表示虚拟地址
+
+　　physaddr_t -- 表示物理地址
+
+这两种类型其实都是32位的整型数(uint32_t)，所以如果你把一个类型的变量的值赋给另一个类型变量，编译器不会报错。但是由于他们都是整型数，所以如果你打算解引用(deference)他们，编译器会报错。
+
+JOS内核可以先对uintptr_t类型的值进行强制类型转换，然后再解析引用。但是对于physaddr_t的值，我们不能这么做，因为内核是需要MMU（内存管理单元）来首先对你输入的地址进行转化的，_如果你对physaddr_t进行强制类型装换再解引用，最终你得到的你要访问的地址，可能不是你要找的真实物理地址。_
+
+在之后的实验中，你将会经常遇到一种情况，多个不同的虚拟地址被同时映射到相同的物理页上面。这时我们需要记录一下每一个物理页上存在着多少不同的虚拟地址来引用它，这个值存放在这个物理页的PageInfo结构体的pp_ref成员变量中。当这个值变为0时，这个物理页才可以被释放。通常来说，任意一个物理页p的pp_ref值等于它在所有的页表项中，被位于虚拟地址UTOP之下的虚拟页所映射的次数（UTOP之上的地址范围在启动的时候已经被映射完成了，之后不会被改动）。
+
+假设下述JOS内核代码是正确的，那么变量x应该是uintptr_t类型呢，还是physaddr_t呢？　　　
+
+```c
+mystery_t x;
+char* value = return_a_pointer();
+*value = 10;
+x = (mystery_t) value;
+```
+
+这里使用了*操作符，所以变量x应该是uintptr_t类型。
+
+## Exercise 4
+
+完成kern/pmap.c中的一下代码：
+
+Pgdir_walk();
+
+Boot_map_region()
+
+page_lookup()
+
+page_remove()
+
+page_insert()
+
+```c
+// Given 'pgdir', a pointer to a page directory, pgdir_walk returns
+// a pointer to the page table entry (PTE) for linear address 'va'.
+// This requires walking the two-level page table structure.
+//
+// The relevant page table page might not exist yet.
+// If this is true, and create == false, then pgdir_walk returns NULL.
+// Otherwise, pgdir_walk allocates a new page table page with page_alloc.
+//    - If the allocation fails, pgdir_walk returns NULL.
+//    - Otherwise, the new page's reference count is incremented,
+//	the page is cleared,
+//	and pgdir_walk returns a pointer into the new page table page.
+//
+// Hint 1: you can turn a PageInfo * into the physical address of the
+// page it refers to with page2pa() from kern/pmap.h.
+//
+// Hint 2: the x86 MMU checks permission bits in both the page directory
+// and the page table, so it's safe to leave permissions in the page
+// directory more permissive than strictly necessary.
+//
+// Hint 3: look at inc/mmu.h for useful macros that manipulate page
+// table and page directory entries.
+//
+pte_t *
+pgdir_walk(pde_t *pgdir, const void *va, int create)
+{
+	// Fill this function in
+	pde_t *pde;
+	pte_t *pte;
+	
+    // 找到pde的地址。
+	pde = &pgdir[PDX(va)];
+	if(*pde & PTE_P){
+		pte = (pte_t*)KADDR(PTE_ADDR(*pde));
+     //如果不存在，则创建一个页
+	}else{
+        // flag，如果不让创建的话，就直接返回NULL。
+		if(!create){
+			return NULL;
+		}
+        // 创建一个页表,传入ALLOC_ZERO，省去memset0的调用。
+        struct pageInfo* page_info = page_alloc(ALLOC_ZERO);
+        // 创建不成功， 返回NULL
+        if(page_info == 0){
+            return NULL;
+        }
+		// reference++
+		page_info->pp_ref++;
+        
+		*pde = page2pa(page_info) | PTE_P | PTE_W | PTE_U;
+        // pde物理地址地址转化为kern虚拟地址
+        pte = KADDR(PTE_ADDR(*pde));
+	}
+	return &pte[PTX(va)];
+}
+```
+
+```c
+//
+// Map [va, va+size) of virtual address space to physical [pa, pa+size)
+// in the page table rooted at pgdir.  Size is a multiple of PGSIZE, and
+// va and pa are both page-aligned.
+// Use permission bits perm|PTE_P for the entries.
+//
+// This function is only intended to set up the ``static'' mappings
+// above UTOP. As such, it should *not* change the pp_ref field on the
+// mapped pages.
+//
+// Hint: the TA solution uses pgdir_walk
+static void
+boot_map_region(pde_t *pgdir, uintptr_t va, size_t size, physaddr_t pa, int perm)
+{
+	// Fill this function in
+	int i;
+	pte_t *entry = NULL;
+    // 一个page 一个page的映射，没有什么好说的。
+	for(int i = 0; i < size; i += PGSIZE){
+        entry = pgdir_walk(pgdir, (void*)va, 1);
+        
+        *entry = (pa | perm | PTE_P);
+        
+        pa += PGSIZE;
+        va += PGSIZE;
+	}
+}
+
+```
+
+```c
+//
+// Map the physical page 'pp' at virtual address 'va'.
+// The permissions (the low 12 bits) of the page table entry
+// should be set to 'perm|PTE_P'.
+//
+// Requirements
+//   - If there is already a page mapped at 'va', it should be page_remove()d.
+//   - If necessary, on demand, a page table should be allocated and inserted
+//     into 'pgdir'.
+//   - pp->pp_ref should be incremented if the insertion succeeds.
+//   - The TLB must be invalidated if a page was formerly present at 'va'.
+//
+// Corner-case hint: Make sure to consider what happens when the same
+// pp is re-inserted at the same virtual address in the same pgdir.
+// However, try not to distinguish this case in your code, as this
+// frequently leads to subtle bugs; there's an elegant way to handle
+// everything in one code path.
+//
+// RETURNS:
+//   0 on success
+//   -E_NO_MEM, if page table couldn't be allocated
+//
+// Hint: The TA solution is implemented using pgdir_walk, page_remove,
+// and page2pa.
+//
+int
+page_insert(pde_t *pgdir, struct PageInfo *pp, void *va, int perm)
+{
+	// Fill this function in
+    pte_t* entry = 0;
+	entry = pgdir_walk(pgdir, (void*)va, 1);
+    // 如果分配不成功
+	if(entry == NULL){
+		return -E_NO_MEM;
+	}
+	// reference ++
+	pp->pp_ref++;
+    // 如果已经存在，那么将这个地址上的page给初始化掉。
+	if(*entry | PTE_P){
+		page_remove(pgidr, va);
+	}
+	
+    // 设置PTE
+	*makentry = page2pa(pp) | perm | PTE_P;
+	// 设置PDE
+	pgdir[PDX(va)] |= perm;
+	return 0;
+}
+```
+
+```c
+
+// Return the page mapped at virtual address 'va'.
+// If pte_store is not zero, then we store in it the address
+// of the pte for this page.  This is used by page_remove and
+// can be used to verify page permissions for syscall arguments,
+// but should not be used by most callers.
+//
+// Return NULL if there is no page mapped at va.
+//
+// Hint: the TA solution uses pgdir_walk and pa2page.
+//
+struct PageInfo *
+page_lookup(pde_t *pgdir, void *va, pte_t **pte_store)
+{
+	// Fill this function in
+	pte_t* entry = NULL;
+	struct PageInfo* page_info = NULL
+    // 寻找pte，但是如果没有，并不创建它。
+	entry = pgdir_walk(pgdir, (void*)va, 0);
+	if(entry == NULL){
+		return NULL;
+	}
+	// 如果page不存在的话，return NULL
+	if(!(*entry & PTE_P)){
+		return NULL;
+	}
+	
+    //转换页信息
+	page_info = pa2page(PTE_ADDR(*entry));
+	
+	if(pte_store != NULL){
+		*ptr_store = entry;
+	}
+	return page_info;
+}
+
+```
+
+```c
+
+// Unmaps the physical page at virtual address 'va'.
+// If there is no physical page at that address, silently does nothing.
+//
+// Details:
+//   - The ref count on the physical page should decrement.
+//   - The physical page should be freed if the refcount reaches 0.
+//   - The pg table entry corresponding to 'va' should be set to 0.
+//     (if such a PTE exists)
+//   - The TLB must be invalidated if you remove an entry from
+//     the page table.
+//
+// Hint: The TA solution is implemented using page_lookup,
+// 	tlb_invalidate, and page_decref.
+//
+void
+page_remove(pde_t *pgdir, void *va)
+{
+	// Fill this function in
+	pte_t* entry = NULL;
+    // 找这个page，并且将
+	struct PageInfo *page = page_lookup(pgdir, va, &entry);
+	if(page == null) return;
+	
+	// page->pp_ref--, 如果是
+	page_decref(page);
+    // 底层使用汇编清除va地址上的tlb缓存，
+	tlb_invalidate(pgdir, va);
+	*entry = NULL;
+}
+
+```
+
