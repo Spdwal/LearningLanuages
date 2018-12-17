@@ -198,3 +198,17 @@ page_free(struct PageInfo *pp)
 
 ```
 
+# Part 2: Virtual Memory
+
+## Exercise 2
+
+阅读Intel 80386 Reference Manual的第五章和第六章，重点是页转换和page-based protection。
+
+文档写的是真的晦涩，难看的要命。
+
+在x86中，一个虚拟地址是有一个段选择子和一个段offset组成的。一个虚拟地址转换成物理地址需要经过段转换和页转换。
+
+在boot/boot.s中，我们吧GDT加载进了内存，并且通过将段地址设置为0~0xffffffff来关闭了段转换，所以现在selector就没有用了，线性地址就等于虚拟地址的偏移。在Lab1中，我们加载了一个简单的页表，然后内核可以运行在0xf0100000中，这个页表只映射了4MB的内存。我们将会使它映射虚拟地址0xf0000000的头256MB，并且映射其他的虚拟地址空间。
+
+## Exercise 3
+
