@@ -113,29 +113,48 @@ page_init(void)
 	// Change the code to reflect this.
 	// NB: DO NOT actually touch the physical memory corresponding to
 	// free pages!
-	size_t i;
-    // 第一个page是被使用的；
-    pages[0].pp_ref = 1;
-	for (i = 1; i < npages_basemem; i++) {
-		pages[i].pp_ref = 0;
-		pages[i].pp_link = page_free_list;
-        // 因为是空闲页，所以将它送入pages_free_list链表。
-        // 头插法进入链表
-		page_free_list = &pages[i];
+    size_t i;
+	page_free_list = NULL;
+	int num_alloc = PADDR(boot_alloc(0)) / PGSIZE;
+	int num_iohole = 96;
+	for(i = 0; i < npages; i++){
+		if(i == 0){
+			pages[i].pp_ref = 1;
+		}
+		else if(i >= npages_basemem && i < npages_basemem + num_iohole + num_alloc){
+			pages[i].pp_ref = 1;
+		}else{
+			pages[i].pp_ref = 0;
+			pages[i].pp_link = page_free_list;
+			page_free_list = &pages[i];
+		}
 	}
-    // 返回可分配空间的第一个位置，计算出的它物理地址，然后除以PGSIZE,得出extmem区域中已经被占用的页数。
- 	int num_alloc = ((uint_32t)boot_alloc(0) - KERNBASE) / PGSIZE;
-    // iohole区域被占用的页数。
-    int iohole = (EXTPHYSMEM - IOPHYMEM) / PGSIZE;
-    // iohole 不能被alloc
-    for(; i < npages_basemem + num_alloc + iohole; ++i){
-        pages[i].pp_ref = 1;
-    }
-    for(i = npages_basemem + num_alloc + iohole; i < npages; ++i){
-        pages[i].pp_ref = 0;
-        pages[i].pp_link = page_free_list;
-        page_free_list = &pages[i];
-    }
+	// size_t i;
+    // // 第一个page是被使用的；
+    // 此代码错误，没有初始化page_free_list！！！！！！
+    // 所以page_free_list的尾部没有指向NULL！！！！！！
+    // 所以左后出错了！！！！
+    // pages[0].pp_ref = 1;
+	// for (i = 1; i < npages_basemem; i++) {
+	// 	pages[i].pp_ref = 0;
+	// 	pages[i].pp_link = page_free_list;
+    //    // 因为是空闲页，所以将它送入pages_free_list链表。
+    //    // 头插法进入链表
+	//	page_free_list = &pages[i];
+	//}
+    // // 返回可分配空间的第一个位置，计算出的它物理地址，然后除以PGSIZE,得出extmem区域中已经被占用的页数。
+ 	// int num_alloc = ((uint_32t)boot_alloc(0) - KERNBASE) / PGSIZE;
+    //  // iohole区域被占用的页数。
+    // int iohole = (EXTPHYSMEM - IOPHYMEM) / PGSIZE;
+    // // iohole 不能被alloc
+    // for(; i < npages_basemem + num_alloc + iohole; ++i){
+    //     pages[i].pp_ref = 1;
+    // }
+    // for(i = npages_basemem + num_alloc + iohole; i < npages; ++i){
+    //     pages[i].pp_ref = 0;
+    //     pages[i].pp_link = page_free_list;
+    //     page_free_list = &pages[i];
+    // }
 }
 ```
 
@@ -465,3 +484,253 @@ page_remove(pde_t *pgdir, void *va)
 
 ```
 
+# Part 3: Kernel Adress Space
+
+Jos将32位线性地址分成两部分，其中用户环境占据低地址的那部分，内核负责维护和控制高地址的部分。他们的分界线被定义为inc/memlayout.h的ULIM
+
+```c
+#define NPTENTRITS 1024                       // 每一个page table里有几个entry
+#define PTSIZE (PGSIZE*NPTENTRIES)            // page table size，一个pagetable hold的内存
+#define KSTACKTOP KERNBASE     
+#define MMIOLIM (KSTACKTOP - PTSIZE)          // 
+#define MMILBASE (MMIOLIM - PTSIZE)
+#define ULIM (MMIOBASE)
+```
+
+```c
+
+/*
+ * Virtual memory map:                                Permissions
+ *                                                    kernel/user
+ *
+ *    4 Gig -------->  +------------------------------+
+ *                     |                              | RW/--
+ *                     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ *                     :              .               :
+ *                     :              .               :
+ *                     :              .               :
+ *                     |~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~| RW/--
+ *                     |                              | RW/--
+ *                     |   Remapped Physical Memory   | RW/--
+ *                     |                              | RW/--
+ *    KERNBASE, ---->  +------------------------------+ 0xf0000000      --+
+ *    KSTACKTOP        |     CPU0's Kernel Stack      | RW/--  KSTKSIZE   |
+ *                     | - - - - - - - - - - - - - - -|                   |
+ *                     |      Invalid Memory (*)      | --/--  KSTKGAP    |
+ *                     +------------------------------+                   |
+ *                     |     CPU1's Kernel Stack      | RW/--  KSTKSIZE   |
+ *                     | - - - - - - - - - - - - - - -|                 PTSIZE
+ *                     |      Invalid Memory (*)      | --/--  KSTKGAP    |
+ *                     +------------------------------+                   |
+ *                     :              .               :                   |
+ *                     :              .               :                   |
+ *    MMIOLIM ------>  +------------------------------+ 0xefc00000      --+
+ *                     |       Memory-mapped I/O      | RW/--  PTSIZE
+ * ULIM, MMIOBASE -->  +------------------------------+ 0xef800000
+ *                     |  Cur. Page Table (User R-)   | R-/R-  PTSIZE
+ *    UVPT      ---->  +------------------------------+ 0xef400000
+ *                     |          RO PAGES            | R-/R-  PTSIZE
+ *    UPAGES    ---->  +------------------------------+ 0xef000000
+ *                     |           RO ENVS            | R-/R-  PTSIZE
+ * UTOP,UENVS ------>  +------------------------------+ 0xeec00000
+ * UXSTACKTOP -/       |     User Exception Stack     | RW/RW  PGSIZE
+ *                     +------------------------------+ 0xeebff000
+ *                     |       Empty Memory (*)       | --/--  PGSIZE
+ *    USTACKTOP  --->  +------------------------------+ 0xeebfe000
+ *                     |      Normal User Stack       | RW/RW  PGSIZE
+ *                     +------------------------------+ 0xeebfd000
+ *                     |                              |
+ *                     |                              |
+ *                     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ *                     .                              .
+ *                     .                              .
+ *                     .                              .
+ *                     |~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~|
+ *                     |     Program Data & Heap      |
+ *    UTEXT -------->  +------------------------------+ 0x00800000
+ *    PFTEMP ------->  |       Empty Memory (*)       |        PTSIZE
+ *                     |                              |
+ *    UTEMP -------->  +------------------------------+ 0x00400000      --+
+ *                     |       Empty Memory (*)       |                   |
+ *                     | - - - - - - - - - - - - - - -|                   |
+ *                     |  User STAB Data (optional)   |                 PTSIZE
+ *    USTABDATA ---->  +------------------------------+ 0x00200000        |
+ *                     |       Empty Memory (*)       |                   |
+ *    0 ------------>  +------------------------------+                 --+
+ *
+ * (*) Note: The kernel ensures that "Invalid Memory" is *never* mapped.
+ *     "Empty Memory" is normally unmapped, but user programs may map pages
+ *     there if desired.  JOS user programs map pages temporarily at UTEMP.
+ */
+```
+
+Jos为内核保留了256MB的虚拟空间，这样就可以理解，为什么在实验中要给操作系统设计一个高地址的地址空间，如果不这样做，用户环境的地址空间就不够了。
+
+由于内核和用户进程只能访问各自的地址空间，所以我们必须在x86的页表中使用访问权限位来使用用户进程的代码只能访问用户地址空间，而访问不了内核地址空间，否则用户代码中的错误会覆盖内核中的数据，导致内核的崩溃。
+
+用户地址空间的代码不能访问高于ULIM的地址空间，但是内核可以读写这部分空间。而内核和用户对于地址[UTOP, ULIM]有相同的访问权限，可以读取，但是不可以写入，这一个部分的地址空间通常被用于把一些只读的内核数据结构暴露给用户地址空间的代码。在UTOP之下的地址范围是给用户使用的，用户进程可以访问，修改这部分地址空间的内容。
+
+## Exercise 5
+
+继续晚上mem_init()函数，程序必须能通过check_kern_pgdir和check_page_installed_pgdir函数的检测。
+
+```C
+
+// Set up a two-level page table:
+//    kern_pgdir is its linear (virtual) address of the root
+//
+// This function only sets up the kernel part of the address space
+// (ie. addresses >= UTOP).  The user part of the address space
+// will be set up later.
+//
+// From UTOP to ULIM, the user is allowed to read but not write.
+// Above ULIM the user cannot read or write.
+void
+mem_init(void)
+{
+	uint32_t cr0;
+	size_t n;
+
+	// Find out how much memory the machine has (npages & npages_basemem).
+	i386_detect_memory();
+
+	// Remove this line when you're ready to test this function.
+	// panic("mem_init: This function is not finished\n");
+
+	//////////////////////////////////////////////////////////////////////
+	// create initial page directory.
+	kern_pgdir = (pde_t *) boot_alloc(PGSIZE);
+	memset(kern_pgdir, 0, PGSIZE);
+
+	//////////////////////////////////////////////////////////////////////
+	// Recursively insert PD in itself as a page table, to form
+	// a virtual page table at virtual address UVPT.
+	// (For now, you don't have understand the greater purpose of the
+	// following line.)
+
+	// Permissions: kernel R, user R
+	kern_pgdir[PDX(UVPT)] = PADDR(kern_pgdir) | PTE_U | PTE_P;
+
+	//////////////////////////////////////////////////////////////////////
+	// Allocate an array of npages 'struct PageInfo's and store it in 'pages'.
+	// The kernel uses this array to keep track of physical pages: for
+	// each physical page, there is a corresponding struct PageInfo in this
+	// array.  'npages' is the number of physical pages in memory.  Use memset
+	// to initialize all fields of each struct PageInfo to 0.
+	// Your code goes here:
+	pages = (struct PageInfo *)boot_alloc(npages*sizeof(struct PageInfo));
+	memset(pages, 0, npages * sizeof(struct PageInfo));
+
+	//////////////////////////////////////////////////////////////////////
+	// Now that we've allocated the initial kernel data structures, we set
+	// up the list of free physical pages. Once we've done so, all further
+	// memory management will go through the page_* functions. In
+	// particular, we can now map memory using boot_map_region
+	// or page_insert
+	page_init();
+
+	check_page_free_list(1);
+	check_page_alloc();
+	check_page();
+
+	//////////////////////////////////////////////////////////////////////
+	// Now we set up virtual memory
+
+	//////////////////////////////////////////////////////////////////////
+	// Map 'pages' read-only by the user at linear address UPAGES
+	// Permissions:
+	//    - the new image at UPAGES -- kernel R, user R
+	//      (ie. perm = PTE_U | PTE_P)
+	//    - pages itself -- kernel RW, user NONE
+	// Your code goes here:
+	boot_map_region(kern_pgdir, UPAGES, ROUNDUP(npages* sizeof(struct PageInfo), PGSIZE), PADDR(pages), PTE_U);
+	//////////////////////////////////////////////////////////////////////
+	// Use the physical memory that 'bootstack' refers to as the kernel
+	// stack.  The kernel stack grows down from virtual address KSTACKTOP.
+	// We consider the entire range from [KSTACKTOP-PTSIZE, KSTACKTOP)
+	// to be the kernel stack, but break this into two pieces:
+	//     * [KSTACKTOP-KSTKSIZE, KSTACKTOP) -- backed by physical memory
+	//     * [KSTACKTOP-PTSIZE, KSTACKTOP-KSTKSIZE) -- not backed; so if
+	//       the kernel overflows its stack, it will fault rather than
+	//       overwrite memory.  Known as a "guard page".
+	//     Permissions: kernel RW, user NONE
+	// Your code goes here:
+    // 需要注意的一点就是，
+	boot_map_region(kern_pgdir, KSTACKTOP - KSTKSIZE, KSTKSIZE, PADDR(bootstack), PTE_W);
+
+	//////////////////////////////////////////////////////////////////////
+	// Map all of physical memory at KERNBASE.
+	// Ie.  the VA range [KERNBASE, 2^32) should map to
+	//      the PA range [0, 2^32 - KERNBASE)
+	// We might not have 2^32 - KERNBASE bytes of physical memory, but
+	// we just set up the mapping anyway.
+	// Permissions: kernel RW, user NONE
+	// Your code goes here:
+	boot_map_region(kern_pgdir, KERNBASE, 0xffffffff - KERNBASE, 0, PTE_W);
+	// Check that the initial page directory has been set up correctly.
+	check_kern_pgdir();
+
+	// Switch from the minimal entry page directory to the full kern_pgdir
+	// page table we just created.	Our instruction pointer should be
+	// somewhere between KERNBASE and KERNBASE+4MB right now, which is
+	// mapped the same way by both page tables.
+	//
+	// If the machine reboots at this point, you've probably set up your
+	// kern_pgdir wrong.
+	lcr3(PADDR(kern_pgdir));
+
+	check_page_free_list(0);
+
+	// entry.S set the really important flags in cr0 (including enabling
+	// paging).  Here we configure the rest of the flags that we care about.
+	cr0 = rcr0();
+	cr0 |= CR0_PE|CR0_PG|CR0_AM|CR0_WP|CR0_NE|CR0_MP;
+	cr0 &= ~(CR0_TS|CR0_EM);
+	lcr0(cr0);
+
+	// Some more checks, only possible after kern_pgdir is installed.
+	check_page_installed_pgdir();
+}
+
+```
+
+## Questions
+
+### Q2
+
+哪些地址对应哪些表项：
+
+| entry | base virtual addres | point to(logically)                       |
+| ----- | ------------------- | ----------------------------------------- |
+| 1023  | 0xffc00000          | Page table for top 4MB of phys memory     |
+| 961   | 0xf0400000          | Page table for [4,8) Mb of physics memory |
+| 960   | 0xf0000000          | Page table for [0,4) Mb of physics memory |
+| 959   | 0xefc00000          | bootstack                                 |
+| 958   | 0xef800000          | Kern_pgdir                                |
+| 957   | 0xef400000          | pages数组                                 |
+
+等等，见上面的布局分布图。
+
+### Q3
+
+我们讲内核和用户的环境放在相同的地址上，为什么用户程序不能读取或者写入内核代码，我们使用了什么机制来保护内核的空间。
+
+在JOS中是通过分页机制来实现，将页表中的对应flag置0即可。
+
+### Q4
+
+这个操作系统的最大内存是多少？
+
+4MB空间Upages来房所有页的信息，每一个页的信息为8Byte，所以一共可以放512k个pageInfo，所以是512k个物理页，每个物理页面大小为4kb，所以总的物理内存占2GB。
+
+### Q5
+
+如果所有的物理内存页达到最大个数，那么管理这些内存所需要的额外空间需要多少。
+
+pageinfo需要4MB，页目录表需要4kb，所以需要4MB+4kb.
+
+### Q6
+
+回顾entry.S文件中，当分页机制开启时，寄存器EIP的值仍旧是一个小的值。在哪个位置代码才开始运行在高于KERNBASE的虚拟地址空间中的？当程序位于开启分页之后到运行在KERNBASE之上这之间的时候，EIP的值是小的值，怎么保证可以把这个值转换为真实物理地址的？
+
+jmp *%eax实现的跳转，重新设置EIP的值，把它设置为寄存器eax中的值，这个时候发生了跳转。
