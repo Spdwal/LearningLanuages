@@ -84,3 +84,319 @@ memset(envs, 0, NENV * sizeof(struct Env));
 boot_map_region(kern_pgdir, UENVS, PTSIZE, PADDR(envs), PTE_U);
 ```
 
+## Creating and Running Environments
+
+现在我们要做的事在kern/env.c中运行一个用户环境，因为我们现在还没有一个文件系统，所以我们将会设置内核去加载一个在内核中的二进制程序景象文件。
+
+Lab3中的GUNMakefile产生了一大堆二进制镜像在obj/user/文件夹中，我们观察kern/Makefrag中的代码，我们将会发现一些魔法来链接这些以.o结尾的二进制文件进入内核中执行。这个-b链接命令使这些文件被作为一个作为二机制执行文件链接到内核之后。
+
+### Exercise 2
+
+在文件env.c中完成如下函数：
+
+env_init()：初始化所有的在envs数组中的Env结构体，并且把他们加入到env_free_list中，在中间调用env_init_percpu()，来设置硬件段并且将每一个段设置为优先级0或者优先级3。
+
+```c
+// Mark all environments in 'envs' as free, set their env_ids to 0,
+// and insert them into the env_free_list.
+// Make sure the environments are in the free list in the same order
+// they are in the envs array (i.e., so that the first call to
+// env_alloc() returns envs[0]).
+//
+void
+env_init(void)
+{
+	// Set up envs array
+	// LAB 3: Your code here.
+	int i = 0;
+
+	env_free_list = NULL;
+    // 和pageinit类似，但是因为需要有相同的顺序，所以需要用头插法。
+	for(i = NENV-1; i >=0 ;--i){
+		envs[i].env_id = 0;
+		envs[i].env_status = ENV_FREE;
+		envs[i].env_link = env_free_list;
+		env_free_list = &&envs[i];
+	}
+	
+	// Per-CPU part of the initialization
+	env_init_percpu();
+}
+```
+
+env_setup_vm():分配一个pgdir为一个新环境并且在内核中为新的环境初始化一个空间地址。
+
+```c
+
+//
+// Initialize the kernel virtual memory layout for environment e.
+// Allocate a page directory, set e->env_pgdir accordingly,
+// and initialize the kernel portion of the new environment's address space.
+// Do NOT (yet) map anything into the user portion
+// of the environment's virtual address space.
+//
+// Returns 0 on success, < 0 on error.  Errors include:
+//	-E_NO_MEM if page directory or table could not be allocated.
+//
+static int
+env_setup_vm(struct Env *e)
+{
+	int i;
+	struct PageInfo *p = NULL;
+
+	// Allocate a page for the page directory
+	if (!(p = page_alloc(ALLOC_ZERO)))
+		return -E_NO_MEM;
+
+	// Now, set e->env_pgdir and initialize the page directory.
+	//
+	// Hint:
+	//    - The VA space of all envs is identical above UTOP
+	//	(except at UVPT, which we've set below).
+	//	See inc/memlayout.h for permissions and layout.
+	//	Can you use kern_pgdir as a template?  Hint: Yes.
+	//	(Make sure you got the permissions right in Lab 2.)
+	//    - The initial VA below UTOP is empty.
+	//    - You do not need to make any more calls to page_alloc.
+	//    - Note: In general, pp_ref is not maintained for
+	//	physical pages mapped only above UTOP, but env_pgdir
+	//	is an exception -- you need to increment env_pgdir's
+	//	pp_ref for env_free to work correctly.
+	//    - The functions in kern/pmap.h are handy.
+	
+	// LAB 3: Your code here.
+    e->env_pgdir = (pde_t*)page2kva(p);
+    p->pp_ref++;
+    
+    for(int i =0; i < PDX(UTOP); ++i){
+        e-env_pgdir[i] = NULL;
+    }
+    
+    for(int i = PDX(UTOP); i < NPENTIRES; ++i){
+        e->env_pgdir[i] = kern_pgdir[i];
+    }
+	// UVPT maps the env's own page table read-only.
+	// Permissions: kernel R, user R
+	e->env_pgdir[PDX(UVPT)] = PADDR(e->env_pgdir) | PTE_P | PTE_U;
+	
+	return 0;
+}
+
+```
+
+region_alloc():为他分配和map物理地址。
+
+```c
+//
+// Allocate len bytes of physical memory for environment env,
+// and map it at virtual address va in the environment's address space.
+// Does not zero or otherwise initialize the mapped pages in any way.
+// Pages should be writable by user and kernel.
+// Panic if any allocation attempt fails.
+//
+static void
+region_alloc(struct Env *e, void *va, size_t len)
+{
+	// LAB 3: Your code here.
+	// (But only if you need it for load_icode.)
+	//
+	// Hint: It is easier to use region_alloc if the caller can pass
+	//   'va' and 'len' values that are not page-aligned.
+	//   You should round va down, and round (va + len) up.
+	//   (Watch out for corner-cases!)
+    // RoundDown and RoundUp
+	void *strat = (void *) ROUNDDOWN(va, PGSIZE);
+	void *end   = (void *) ROUNDUP(va+len, PGSIZE);
+	
+    // 保存page信息，供之后使用。
+	struct PageInfo *p = NULL;
+	void *i;
+	int result;
+	for(i = start; i < end; i += PGSIZE){
+		p = page_alloc(0);
+		if(p == NULL){
+			panic("Region alloc failed.\n");
+		}
+		// 在env_pgdir中插入page，并且map进地址。
+		reslut = page_insert(env->env_pgdir, p, i, PTE_W |PTE_U);
+		if(result != 0){
+			panic("Region alloc failed in page insert.\n");
+		}
+	}
+}
+
+```
+
+Load_icode()：分析一个ELF二进制文件的景象，就和boot loader所做的非常相似，将他的contents加载到一个新的环境的用户空间。
+
+```c
+//
+// Set up the initial program binary, stack, and processor flags
+// for a user process.
+// This function is ONLY called during kernel initialization,
+// before running the first user-mode environment.
+//
+// This function loads all loadable segments from the ELF binary image
+// into the environment's user memory, starting at the appropriate
+// virtual addresses indicated in the ELF program header.
+// At the same time it clears to zero any portions of these segments
+// that are marked in the program header as being mapped
+// but not actually present in the ELF file - i.e., the program's bss section.
+//
+// All this is very similar to what our boot loader does, except the boot
+// loader also needs to read the code from disk.  Take a look at
+// boot/main.c to get ideas.
+//
+// Finally, this function maps one page for the program's initial stack.
+//
+// load_icode panics if it encounters problems.
+//  - How might load_icode fail?  What might be wrong with the given input?
+//
+static void
+load_icode(struct Env *e, uint8_t *binary)
+{
+	// Hints:
+	//  Load each program segment into virtual memory
+	//  at the address specified in the ELF segment header.
+	//  You should only load segments with ph->p_type == ELF_PROG_LOAD.
+	//  Each segment's virtual address can be found in ph->p_va
+	//  and its size in memory can be found in ph->p_memsz.
+	//  The ph->p_filesz bytes from the ELF binary, starting at
+	//  'binary + ph->p_offset', should be copied to virtual address
+	//  ph->p_va.  Any remaining memory bytes should be cleared to zero.
+	//  (The ELF header should have ph->p_filesz <= ph->p_memsz.)
+	//  Use functions from the previous lab to allocate and map pages.
+	//
+	//  All page protection bits should be user read/write for now.
+	//  ELF segments are not necessarily page-aligned, but you can
+	//  assume for this function that no two segments will touch
+	//  the same virtual page.
+	//
+	//  You may find a function like region_alloc useful.
+	//
+	//  Loading the segments is much simpler if you can move data
+	//  directly into the virtual addresses stored in the ELF binary.
+	//  So which page directory should be in force during
+	//  this function?
+	//
+	//  You must also do something with the program's entry point,
+	//  to make sure that the environment starts executing there.
+	//  What?  (See env_run() and env_pop_tf() below.)
+
+	// LAB 3: Your code here.
+
+	// Now map one page for the program's initial stack
+	// at virtual address USTACKTOP - PGSIZE.
+
+	// LAB 3: Your code here.
+	struct Elf* header = (struct Elf*)binary;
+	struct Proghdr *ph, *eph;
+	if(header->e_magic != ELF_MAGIC){
+		panic("Load icode failed: The binary we load is not elf.\n");
+	}
+
+	if(header->e_entry == NULL){
+		panic("Load icode failed:")
+	// 设置程序的入口点，进行切换后就可以直接运行此程序
+	e->env_tf.tf_eip = header->e_entry;
+	lcr3(PADDR(e->env_pgdir));
+        
+    // 取program header 和 end of program header。
+	ph = (struct Proghdr *)((uint8_t)header + header->e_phoff);
+	eph = ph + header->e_phnum;
+	for(; ph < eph; ph++){
+		if(ph->p_type == ELF_PROG_LOAD){
+			if(ph->p_memsz - ph->p_filesz < 0){
+				panic("Load icode failed: p_memsz < p_filesz.\n");
+			}
+			
+            // 将物理地址从va保存入evrionment
+			region_alloc(e, (void *)p->p_va, p->mem_sz);
+            // 将程序整个移动到ph->p_va，
+			memmove((void *)ph->p_va, binary+ph->p_offset, ph->p_filesz);
+            // 将.bss置0。
+			memset((void *)(ph->p_va + ph->p_filesz), 0, p->p_memsz - ph->p_filesz);
+		}
+	}
+	
+    // 设置用户栈
+	region_alloc(e, (void *) (USTACKTOP - PGSIZE), PGSIZE);
+}
+
+```
+
+env_create：利用env_alloc和load_icode函数加载一个ELF文件到用户环境中去。
+
+```c
+
+//
+// Allocates a new env with env_alloc, loads the named elf
+// binary into it with load_icode, and sets its env_type.
+// This function is ONLY called during kernel initialization,
+// before running the first user-mode environment.
+// The new env's parent ID is set to 0.
+//
+void
+env_create(uint8_t *binary, enum EnvType type)
+{
+	// LAB 3: Your code here.
+	struct Env *e;
+	int result;
+	if((result = env_alloc(&e, 0)) != 0){
+		panic("Env_create failed: env_alloc failed.\n");
+	}
+	// 加载
+	load_icode(e, binary);
+	e->env_type = type;
+}
+```
+
+env_run：真正开始一个用户环境
+
+```c
+
+//
+// Context switch from curenv to env e.
+// Note: if this is the first call to env_run, curenv is NULL.
+//
+// This function does not return.
+//
+void
+env_run(struct Env *e)
+{
+	// Step 1: If this is a context switch (a new environment is running):
+	//	   1. Set the current environment (if any) back to
+	//	      ENV_RUNNABLE if it is ENV_RUNNING (think about
+	//	      what other states it can be in),
+	//	   2. Set 'curenv' to the new environment,
+	//	   3. Set its status to ENV_RUNNING,
+	//	   4. Update its 'env_runs' counter,
+	//	   5. Use lcr3() to switch to its address space.
+	// Step 2: Use env_pop_tf() to restore the environment's
+	//	   registers and drop into user mode in the
+	//	   environment.
+
+	// Hint: This function loads the new environment's state from
+	//	e->env_tf.  Go back through the code you wrote above
+	//	and make sure you have set the relevant parts of
+	//	e->env_tf to sensible values.
+
+	// LAB 3: Your code here.
+    // 太简单了。。直接按照提示1 2 3 4 5做下来即可
+	if(curenv != NULL && curenv->env_status == ENV_RUNNING){
+		curenv->env_status = ENV_RUNNABLE;
+	}
+
+	curenv = e;
+	curenv->env_status = ENV_RUNNING;
+	curenv->env_run++;
+	lcr3(PADDR(curenv->env_pgdir));
+
+	env_pop_tf(&curenv->env_tf);
+
+	panic("env_run not yet implemented");
+}
+```
+
+
+
