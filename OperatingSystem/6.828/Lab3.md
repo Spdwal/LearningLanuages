@@ -636,6 +636,14 @@ trap_init(void)
 	// Per-CPU setup 
 	trap_init_percpu();
 }
-
 ```
 
+### Question
+
+1. 为什么不同的异常需要不同的处理函数。
+
+​       这不废话么，不同的异常需要进行不同的处理，所以需要不同的函数进行处理。否则压根不需要这么多不同的中断。
+
+2. grade脚本产生一个protection fault(trap 13),但是softint代码又运行了int $14,为什么它会产生一个vector 13的中断，在这个时候，内核做了什么？
+
+   因为此时在用户态代码之下，用户态特权级为3，此时它企图产生一个特权级为0的中断，所以它产生了 一个protection fault的中断。
