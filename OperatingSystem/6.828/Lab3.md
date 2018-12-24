@@ -116,7 +116,7 @@ env_init(void)
 		envs[i].env_id = 0;
 		envs[i].env_status = ENV_FREE;
 		envs[i].env_link = env_free_list;
-		env_free_list = &&envs[i];
+		env_free_list = &envs[i];
 	}
 	
 	// Per-CPU part of the initialization
@@ -398,5 +398,244 @@ env_run(struct Env *e)
 }
 ```
 
+通过调用链，确保你理解下面的每一步。
 
+- start (kern/entry.S)
+- i386_init(kern/init.c)
+  - cons_init
+  - mem_init
+  - env_init
+  - trap_init(still incomplete at this point)
+  - env_create
+  - env_run
+    - env_pop_tf
+
+当我们在QEMU下运行它的时候，如果一切正常的话，我们的系统会进入用户空间并且通过系统调用，运行hello文件，但是这个时候，它并不会成功运行，因为JOS还没有设置相关硬件来实现从用户态到内核态的转换功能，当CPU发现它没有被设置能成正确处理这种系统调用中断的时候，他会触发一个保护一场，然后又发现这个保护异常也没办法处理，从而又产生一个错误异常，然后又发现仍然无法解决问题，所以最后会放弃，我们把这个称之为"triple fault"。接下来CPU会抚慰，系统会重启。
+
+接下来我们来解决这个问题，不过解决之前我们可以使用调试器来检查一下程序要进入用户模式时做了什么。使用make qemu-gdb 并且在 env_pop_tf 处设置断点，这条指令应该是即将进入用户模式之前的最后一条指令。然后进行单步调试，处理会在执行完 iret 指令后进入用户模式。然后依旧可以看到进入用户态后执行的第一条指令了，该指令是一个cmp指令，开始于文件 lib/entry.S 中。 现在使用 b *0x... 设置一个断点在hello文件（obj/user/hello.asm）中的sys_cputs函数中的 int $0x30 指令处。这个int指令是一个系统调用，用来展示一个字符到控制台。如果你的程序运行不到这个int指令，说明有错误。
+
+经过调试，可以运行到这个指令，但是si之后无限循环。qemu显示：
+
+Triple fault.  Halting for inspection via QEMU monitor.
+
+### Handling Interrupts and Exceptions
+
+到目前为止，当程序运行到第一个系统调用int $0x30的时候，就会进入错误的状态，因为现在系统无法从用户态切换到内核态，所以需要一个基本的异常/系统调用处理机制，使得内核可以从用户态转换为内核态
+
+### Exercise 3
+
+阅读80386文档中的第九章和IA-32开发者手册的第五章。
+
+完成，顺便还看了一下操作系统真相还原，推荐这本书。
+
+在这个Lab中，我们会查看intel的中断，错误，等等，虽然异常，陷阱，中断，falut等等，在架构或者操作系统看来没有标准的意义，但是在x86上它们还是有席位的分别的。当在Lab外看到这些东西的时候，应该要明白它们之间的区别。
+
+## Basics of protected control transfer
+
+异常和中断都是被保护的转移方法，它们会使处理器从用户模式转移到内核模式(CPL = 0)，在这期间，用户态的代码没有权利去干扰内核的运转或者其他环境，在Intel的术语中，一个中断是一个处理器外部异步发生的事件所出发的保护转移方法。比如外部IO硬件的通知，一个异常正好相反，是当前正字啊运行的指令所带来的同步的处理器控制权的转移，比如是除0异常。
+
+为了确保受保护的转移是真真正正的受保护，处理器的中断/异常机制被设计成正在运行的代码无法选择在中断或者异常出现的时候，无法选择内核进入的地点和方法。作为替代，处理器确定内核可以在小心的控制条件下进入，在x86中，由以下两种机制提供保护：
+
+1. 中断描述符表：处理器确定中断和异常只能使内核进入一些特殊的被内核定义好的程序入口点，而不会被用户态代码确定。x86架构允许内核中有256种中断或者异常入口点，每一个都有一个中断向量，一个向量是一个0～255之间的数字，一个中断向量值是根据中断源来决定的：不同设备，错误条件，以及对内核的请求都会产生出不同的中断和中断向量的组合，CPU将使用这个向量作为这个中断在中断向量表中的索引。这个表是由内核设置的，放在内核空间中，这个和GDT非常像，通过表中的任何一个表项，处理器可以知道：
+   + 需要加载到eip寄存器中的值，这个zhi指向了处理这个中断的中断处理程序的位置。
+   + 需要加载到cs寄存器的值，里面还包含了这个中断处理程序的运行特权值。
+2. 任务状态段：处理器在中断或者异常发生，调用异常处理程序之前需要一个空间来保存旧处理器的状态，比如eip和cs的值，这样一来，当异常处理程序结束之后可以重新载入旧状态，并且回复中断代码。但是这个保存的地址也要从无特权的用户态代码中保护起来，否则的话，错误或者不明确的代码会破坏内核的运行。当x86获得一个中断或者一个陷阱，并且使用特权从用户态转换到内核态时，他也会把它的堆栈切换到内核空间。一个叫任务状态段(TSS)的数据结构会详细记录这个堆栈所在的段的段描述符的地址，处理器会把SS,ESP,EFLAGS,CS,EIP和一个可选的错误码等等值压入到这个堆栈上，然后加载处理中断程序的CS，EIP值，并且设置ESP，SS寄存器指向新的堆栈。尽管TSS，并且支持其他很多功能，但是JOS仅仅用它来定义处理器从用户态到内核态所采用的内核对战，由于JOS中的内核特权级就是0，所以处理器用TSS字段的ESP0,SS0字段等来指明这个内核堆栈的位置和大小。
+
+## Types of exceptions and interrupts
+
+x86处理器产生的中断向量是0~31，映射到IDT的0~31。例如一个页错误，会产生一个14号向量的错误，内核可以产生大于31的中断向量，它们可以用过int指令产生，或者是由外部设备产生的外部中断。
+
+在这一节中，我们会扩展JOS的功能，使它能够处理x86产生的0-31的内部中断，在下一节中，我们会使JOS处理中断向量48(0x30)，它主要被用来做系统调用，在Lab4中会继续扩展JOS使它能处理外部硬件终端，例如时钟中断。
+
+## An Example
+
+加下来我们看一个例子，现在处理器正在用户态运行一个代码并且遭到一个除0的错误。
+
+1. 处理器转换到TSS中的SS0和ESP0所指向的堆栈，在JOS中分别存放着GD_KD和KSTACKTOP的值。
+2. 处理器吧异常参数压入内核地址中，起始于地址KSTACKTOP。
+3. 因为我们要处理的是除0异常，它的中断向量是0，处理器会读取IDT表中的0号表项，并且吧cs:eip的值设置为0号中断处理函数的地址值。
+4. 中断处理函数开始执行，并且处理中断。
+
+对于某些特定的异常，除了上面图中要保存的5个值以外，还要再压入一个字，叫做错误码，比如页表错误，就是其中的一个实例。
+
+以上几步都是硬件自动完成的。
+
+## Nested exceptions and interrupts
+
+处理器可以从内核和用户模式中读取中断和异常。只有当处理器从用户态切换到内核态时候，才会自动的切换堆栈，并且把一些寄存器中原来的值压入到堆栈上，并且触发相应的中断处理函数。但是如果处理器已经犹豫正在处理中断而在内核态下，此时CPU只会向栈中压入更多的值，通过这种方式，内核旧可以处理嵌套中断。
+
+如果处理器已经在内核态下并且遇到了嵌套中断，因为他不需要切换堆栈，所以它不需要存储SS,ESP寄存器的值。
+
+在处理器处理嵌套中断的时候，有一个非常重要的警告。如果处理器在内核态下获得一个异常，但是由于栈空间不够而不能将它的旧状态push进栈中，那么处理器旧无法恢复到原来的状态了，他会自己动重启。
+
+## Setting up the IDT
+
+现在应该有了所有的基本信息去设置IDT表，并且在JOS处理异常，现在我们只需要处理内部异常，(中断向量号0~31)。
+
+在头文件inc/trap.h和kern/trap.h中包含了和中断异常相关的非常重要的定义，我们应该好好熟悉一下其中包含的定义。kern/trap.h中包含了仅内核可见的一些定义，inc/trap.h中包含了用户态可见的一些定义。
+
+每一个中断或者异常都有自己的中断处理函数，分别定义在trapentry.S中，trap_init()将初始化IDT表，每一个处理函数都应该构建一个结构体Trapframe在堆栈上，并且调用trap函数指向这个结构体，trap()然后处理异常和中断，给他分配一个中断处理函数。
+
+所以整个操作系统的中断控制流程为：
+
+1. Trap_init()现将所有的中断处理函数的起始地址放在中断向量表IDT中。
+2. 当中断发生的时候，不管是内部中断还是外部中断，处理器捕捉到此中断，并且进入内核态，根据中断向量去查询中断向量表，找到对应的表项。
+3. 保存被中断的程序的上下文到内核堆栈中，调用这个表项中指明的中断处理函数。
+4. 执行中断处理函数。
+5. 执行完成后，回复被中断的进程的上下文，返回用户态，继续运行这个进程。
+
+## Exercise 4
+
+编辑trapentry.S和trap.c，并且完成以下特性。在trapentry.S中的宏TRAPHANDLER和TRAPHANDER_NOEC会对你有帮助，就好像inc/trap.h中的T_*宏一样。你需要在trapentry.S中为每一个陷阱添加一个入口点，并且提供\_alltraps的值。
+
+你需要修改trap_init()函数来初始化idt表，使表中每一项指向定义在trapentry.S中的入口指针，SETGATE宏定义都在这里能用的上。
+
+你所实现的\_alltraps应该：
+
+1. 把值压入堆栈让堆栈看起来像一个结构体Trapframe
+
+2. 加载GD_KD的值到%ds，%es寄存器中
+
+3. 把%esp的值压入，并且传递一个指向此Trapframe的指针到trap()函数中。
+
+4. 调用trap
+
+   考虑使用pushal指令，他会很好的和结构体Trapframe的布局配合好。
+
+```nasm
+
+/*
+ * Lab 3: Your code here for generating entry points for the different traps.
+ */
+/* 参考80386文档的对于trap的描述，来确定每一个trap是否存在errocode */
+	TRAPHANDLER_NOEC(DIVIDE, T_DIVIDE)
+	TRAPHANDLER_NOEC(DEBUG, T_DEBUG)
+	TRAPHANDLER_NOEC(NMI, T_NMI)
+	TRAPHANDLER_NOEC(BRKPT, T_BRKPT)
+	TRAPHANDLER_NOEC(OFLOW, T_OFLOW)
+	TRAPHANDLER_NOEC(BOUND, T_BOUND)
+	TRAPHANDLER_NOEC(ILLOP, T_ILLOP)
+	TRAPHANDLER_NOEC(DEVICE, T_DEVICE)
+	TRAPHANDLER_NOEC(DBLFLT, T_DBLFLT)
+	TRAPHANDLER(TSS, T_TSS)
+	TRAPHANDLER(SEGNP, T_SEGNP)
+	TRAPHANDLER(STACK, T_STACK)
+	TRAPHANDLER(GPFLT, T_GPFLT)
+	TRAPHANDLER(PGFLT, T_PGFLT)
+	TRAPHADDLER_NOEC(FPERR, T_FPERR)
+	TRAPHANDLER(ALIGN, T_ALIGN)
+	TRAPHANDLER_NOEC(MCHK, T_MCHK)
+	TRAPHANDLER_NOEC(SIMDERR, T_SIMDERR)
+	TRAPHANDLER_NOEC(SYSCALL, T_SYSCALL)
+	TRAPHADDLER_NOEC(DEFAULT, T_DEFAULT)
+/*
+ * Lab 3: Your code here for _alltraps
+ */
+
+struct PushRegs {
+	/* registers as pushed by pusha */
+	/* 通过pushax 可以一次性全部push进入 */
+	uint32_t reg_edi;
+	uint32_t reg_esi;
+	uint32_t reg_ebp;
+	uint32_t reg_oesp;		/* Useless */
+	uint32_t reg_ebx;
+	uint32_t reg_edx;
+	uint32_t reg_ecx;
+	uint32_t reg_eax;
+} __attribute__((packed));
+
+struct Trapframe {
+	struct PushRegs tf_regs;
+	uint16_t tf_es;
+	uint16_t tf_padding1;
+	uint16_t tf_ds;
+	uint16_t tf_padding2;
+	uint32_t tf_trapno;
+	/* 在这之上的数据需要手工来进行push， trapno就是errornumber*/
+	/* below here defined by x86 hardware */
+	uint32_t tf_err;
+	uintptr_t tf_eip;
+	uint16_t tf_cs;
+	uint16_t tf_padding3;
+	uint32_t tf_eflags;
+	/* below here only when crossing rings, such as from user to kernel */
+	uintptr_t tf_esp;
+	uint16_t tf_ss;
+	uint16_t tf_padding4;
+} __attribute__((packed));
+
+
+
+.globl _alltraps
+_alltraps:
+	push %ds
+	push %es
+
+	pushal
+
+	movl $GD_KD, %eax
+	movw %ax, %ds
+	movw %ax, %es
+
+	push %esp
+
+	call trap
+
+```
+
+```c
+// 声明各个函数。
+void DIVIDE();
+void DEBUG();
+void NMI();
+void BRKPT();
+void OFLOW();
+void BOUND();
+void ILLOP();
+void DEVICE();
+void DBLFLT();
+void TSS();
+void SEGNP();
+void STACK();
+void GPFLT();
+void PGFLT();
+void FPERR();
+void ALIGN();
+void MCHK();
+void SIMDERR();
+void SYSCALL();
+
+void
+trap_init(void)
+{
+	extern struct Segdesc gdt[];
+
+    
+	// LAB 3: Your code here.
+	// 利用SETGATE将处理函数与idt中的描述符所指向的函数地址相关联
+	SETGATE(idt[T_DIVIDE], 0, GD_KT, DIVIDE, 0);
+	SETGATE(idt[T_DEBUG], 0, GD_KT, DEBUG, 0);
+	SETGATE(idt[T_NMI], 0, GD_KT, NMI, 0);
+	SETGATE(idt[T_BRKPT], 0, GD_KT, BRKPT, 3);
+	SETGATE(idt[T_OFLOW], 0, GD_KT, OFLOW, 0);
+	SETGATE(idt[T_BOUND], 0, GD_KT, BOUND, 0);
+	SETGATE(idt[T_ILLOP], 0, GD_KT, ILLOP, 0);
+	SETGATE(idt[T_DEVICE], 0, GD_KT, DEVICE, 0);
+	SETGATE(idt[T_DBLFLT], 0, GD_KT, DBLFLT, 0);
+	SETGATE(idt[T_TSS], 0, GD_KT, TSS, 0);
+	SETGATE(idt[T_SEGNP], 0, GD_KT, SEGNP, 0);
+	SETGATE(idt[T_STACK], 0, GD_KT, STACK, 0);
+	SETGATE(idt[T_GPFLT], 0, GD_KT, GPFLT, 0);
+	SETGATE(idt[T_PGFLT], 0, GD_KT, PGFLT, 0);
+	SETGATE(idt[T_FPERR], 0, GD_KT, FPERR, 0);
+	SETGATE(idt[T_ALIGN], 0, GD_KT, ALIGN, 0);
+	SETGATE(idt[T_MCHK], 0, GD_KT, MCHK, 0);
+	SETGATE(idt[T_SIMDERR], 0, GD_KT, SIMDERR, 0);
+	SETGATE(idt[T_SYSCALL], 0, GD_KT, SYSCALL, 3);
+	// Per-CPU setup 
+	trap_init_percpu();
+}
+
+```
 
