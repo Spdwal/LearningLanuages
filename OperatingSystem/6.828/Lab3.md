@@ -770,3 +770,156 @@ monitor函数实际上是调用了runcmd函数，在数组里面寻找和命令�
 ## System call
 
 用户态代码会要求内核帮助他实现系统调用。当用户调用一个系统调用，处理器进入内核态。处理器和内核合作将用户程序的状态保存下来，内核运行相应的系统调用代码，然后返回到用户程序继续执行。而用户程序到底是如何得到操作系统的注意的，以及他如何说明操作系统要做什么事情，这个有很多不同的实现方式。
+
+在JOS内核中，我们会使用int指令，他会产生一个处理器的中断。我们用int $0x30来代表系统调用中断。中断0x30不是通过硬件生的。所以在用户代码产生他的时候，没有歧义。
+
+应用会将系统调用号和系统调用的参数通过寄存器进行传递，使用这个方法的话，内核并不需要查询用户环境的栈或者指令流。吸用调用号放在%eax中，参数则放在%edx，%ecx，%ebx，%edi和%esi中，内核会吧返回值送到%eax中。在lib/syscall.c中已经写好的触发一个系统调用的代码。
+
+### Exercise 7
+
+为T_SYSCALL加入一个处理函数，我们需要修改kern/trapentry.S和kern/trap.c中的trap_init()，我们同时也需要改变trap_dispath()调用syscall()来处理系统调用。(定义在kern/syscall.c中)并且将返回值使用%eax传递会用户代码。最后，我们需要完成kern/syscall中的syscall()函数，确保syscall()如果调用参数不对的话，返回-E_INVAL。我们需要阅读并且理解syscall()函数，尤其是里面的嵌入汇编。我们需要处理在inc/syscall.h中定义的所有系统调用。
+
+通过命令make run-hello来调用user/hello代码，如果他打印了"hello, world"然后产生一个page fault，那么我们的系统调用成功了，然后我们可以使用make grade来检测testbss是否成功。
+
+trap_init和之前exercise中写的一样，没有变化，现在我们先看kern/syscall.c
+
+```c
+int32_t
+syscall(uint32_t syscallno, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4, uint32_t a5)
+{
+	// Call the function corresponding to the 'syscallno' parameter.
+	// Return any appropriate return value.
+	// LAB 3: Your code here.
+
+	panic("syscall not implemented");
+
+	switch (syscallno) {
+	case SYS_cputs:
+		sys_cputs((const char*)a1, (size_t) a2);
+	case SYS_cgetc:
+		sys_cgetc();
+	case SYS_env_destroy:
+		sys_env_destroy((envid_t) a1);
+	case SYS_getenvid:
+		sys_getenvid();
+	case NSYSCALLS:
+		return 0;
+	default:
+		return -E_INVAL;
+	}
+}
+```
+
+再看inc/syscall.h中的代码
+
+```
+/* system call numbers */
+enum {
+	SYS_cputs = 0,
+	SYS_cgetc,
+	SYS_getenvid,
+	SYS_env_destroy,
+	NSYSCALLS
+};
+```
+
+然后在lib/syscall.c中有如下代码：
+
+```c
+
+static inline int32_t
+syscall(int num, int check, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4, uint32_t a5)
+{
+	int32_t ret;
+
+	// Generic system call: pass system call number in AX,
+	// up to five parameters in DX, CX, BX, DI, SI.
+	// Interrupt kernel with T_SYSCALL.
+	//
+	// The "volatile" tells the assembler not to optimize
+	// this instruction away just because we don't use the
+	// return value.
+	//
+	// The last clause tells the assembler that this can
+	// potentially change the condition codes and arbitrary
+	// memory locations.
+
+	asm volatile("int %1\n"
+		     : "=a" (ret)
+		     : "i" (T_SYSCALL),
+		       "a" (num),
+		       "d" (a1),
+		       "c" (a2),
+		       "b" (a3),
+		       "D" (a4),
+		       "S" (a5)
+		     : "cc", "memory");
+
+	if(check && ret > 0)
+		panic("syscall %d returned %d (> 0)", num, ret);
+
+	return ret;
+}
+
+void
+sys_cputs(const char *s, size_t len)
+{
+	syscall(SYS_cputs, 0, (uint32_t)s, len, 0, 0, 0);
+}
+
+int
+sys_cgetc(void)
+{
+	return syscall(SYS_cgetc, 0, 0, 0, 0, 0, 0);
+}
+
+int
+sys_env_destroy(envid_t envid)
+{
+	return syscall(SYS_env_destroy, 1, envid, 0, 0, 0, 0);
+}
+
+envid_t
+sys_getenvid(void)
+{
+	 return syscall(SYS_getenvid, 0, 0, 0, 0, 0, 0);
+}
+```
+
+可以看出来，syacall的最底层就是lib/syscall.c中的syscall()代码，这个代码利用内嵌汇编来传递参数，最多可以传递5个参数。接下来我们看看trap_dispach函数
+
+```c
+
+static void
+trap_dispatch(struct Trapframe *tf)
+{
+	// Handle processor exceptions.
+	// LAB 3: Your code here.
+	if(tf->tf_trapno == T_PGFLT){
+		page_fault_handler(tf);
+	}else if(tf->tf_trapno == T_BRKPT){
+		monitor(tf);
+
+	}else if(tf->tf_trapno == T_SYSCALL){
+		int32_t result = syscall(tf->tf_regs.reg_eax,
+					 tf->tf_regs.reg_edx,
+					 tf->tf_regs.reg_ecx,
+					 tf->tf_regs.reg_ebx,
+					 tf->tf_regs.reg_edi,
+					 tf->tf_regs.reg_esi);
+		tf->tf_regs.reg_eax = result;
+	}else{
+		print_trapframe(tf);
+		if (tf->tf_cs == GD_KT)
+			panic("unhandled trap in kernel");
+		else {
+			env_destroy(curenv);
+			return;
+		}
+	}
+	// Unexpected trap: The user process or the kernel has a bug.
+
+}
+```
+
+make grade后，完成。
