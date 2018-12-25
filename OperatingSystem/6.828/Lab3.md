@@ -683,3 +683,36 @@ trap_dispatch(struct Trapframe *tf)
 
 ```
 
+## The Breakpoint Exception
+
+断点异常，中断向量3，是用来允许调试者用来在代码中打断点，将当前代码替换成int3命令。在JOS中，我们会将这个异常转换成一个伪系统调用，这样子的话，任何用户环境都可以使用这个微系统调用来触发JOS kernel monitor。
+
+### Exercise 6
+
+修改trap_dispatch函数，使断点异常发生时，能够触发kernel monitor，修改完成后运行make grade，运行结果应该是你修改后能够正确运行breakpoint测试程序
+
+```c
+
+static void
+trap_dispatch(struct Trapframe *tf)
+{
+	// Handle processor exceptions.
+	// LAB 3: Your code here.
+	if(tf->tf_trapno == T_PGFLT){
+		page_fault_handler(tf);
+	}else if(tf->tf_trapno == T_BRKPT){
+		monitor(tf);
+	}else{
+		print_trapframe(tf);
+		if (tf->tf_cs == GD_KT)
+			panic("unhandled trap in kernel");
+		else {
+			env_destroy(curenv);
+			return;
+		}
+	}
+	// Unexpected trap: The user process or the kernel has a bug.
+
+}
+```
+
