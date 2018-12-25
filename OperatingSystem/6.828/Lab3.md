@@ -923,3 +923,37 @@ trap_dispatch(struct Trapframe *tf)
 ```
 
 make grade后，完成。
+
+### Challenge
+
+TODO
+
+## User-mode startup
+
+一个用户程序从lib/entry.S处开始运行，经过了一些设置，代码运行在inb/libmain.c中的libmain()处，你可以修改libmain()代码来初始化全局指针thisenv来指向环境中的Env结构体数组envs，libmian然后调用umain函数，这个umain恰好是user/hello.c中被调用的函数。在之前的实验中，hello.c程序只会打印hello,world这句话，然后就会page fault错误，原因就是thisenv->env_id这句话，现在正确初始化thisenv的值之后，在此运行就不会报错了。
+
+### Exercise 8
+
+吧我们感概提到的代码补全，然后重新启动内核，此时应该看到user/hello程序会打印hello, world，然后打印出来i am environment 00001000 user/hello然后会尝试通过调用sys_env_destroy来进行退出，由于内核目前只支持一个用户运行环境，所以它应该汇报 “已经销毁用户环境”的消息，然后退回内核监控器(kernel monitor)。
+
+```c
+void
+libmain(int argc, char **argv)
+{
+	// set thisenv to point at our Env structure in envs[].
+	// LAB 3: Your code here.
+	envid_t envid = sys_getenvid();
+	thisenv = &envs[ENVX(envid)];
+
+	// save the name of the program so that panic() can use it
+	if (argc > 0)
+		binaryname = argv[0];
+
+	// call user main routine
+	umain(argc, argv);
+
+	// exit gracefully
+	exit();
+}
+```
+
