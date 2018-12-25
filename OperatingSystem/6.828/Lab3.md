@@ -647,3 +647,39 @@ trap_init(void)
 2. grade脚本产生一个protection fault(trap 13),但是softint代码又运行了int $14,为什么它会产生一个vector 13的中断，在这个时候，内核做了什么？
 
    因为此时在用户态代码之下，用户态特权级为3，此时它企图产生一个特权级为0的中断，所以它产生了 一个protection fault的中断。
+
+## Part B: Page Faults, Breakpoints Exceptions, and System Calls
+
+### Handling Page Faults
+
+Page fault异常，中断向量号14（T_PGFLT)，他是一个非常重要的异常。当一个处理器发现了一个page fault，它储存产生这个异常的地址在一个特殊的控制寄存器cr2中，在trap.c中，我们给了一个特殊的函数page_fault_hander()来处理page fault exception。
+
+### Exercese 5
+
+修改一下trap_dispatch函数，使系统能把缺页异常引导到page_fault_handler()，在修改完成后，运行magegrade，出现的结果是你修改后的JOS可以成功运行faultread，faultreadkernel，faultwarite，faultwritekernel测试程序。
+
+```c
+
+static void
+trap_dispatch(struct Trapframe *tf)
+{
+	// Handle processor exceptions.
+	// LAB 3: Your code here.
+    // 太简单了。。就比较一下trapno即可
+	if(tf->tf_trapno == T_PGFLT){
+		page_fault_handler(tf);
+	}else{
+		print_trapframe(tf);
+		if (tf->tf_cs == GD_KT)
+			panic("unhandled trap in kernel");
+		else {
+			env_destroy(curenv);
+			return;
+		}
+	}
+	// Unexpected trap: The user process or the kernel has a bug.
+
+}
+
+```
+
