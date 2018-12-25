@@ -957,3 +957,101 @@ libmain(int argc, char **argv)
 }
 ```
 
+## Page faults ane memory protection
+
+内存保护机制是操作系统的一个非常重要的机制，它保证程序的bug不会终止其他程序，或者直接让操作系统崩溃。
+
+操作系统一般会依靠硬件来实现内存保护。操作系统可以让硬件始终明白哪些虚拟地址是有效的，哪些是无效的。当程序尝试去访问一个无效地址，或者尝试去访问一个超出它访问权限的地址，处理器会在这个指令处终止，并且触发一个异常，陷入内核态。同时将错误信息传递给操作系统。如果异常可以被修复，那么内核就会修复这个异常，然后程序继续运行，如果异常无法被修复，则程序永远不会继续运行。
+
+作为一个可修复异常的例子，想想一个自动增长的栈，在许多系统中，只给栈分配了一个页表，如果程序错误的访问到了栈以下的页，内核会再给他分配一个页表，然后让程序继续往下走。为了做到这个，内核只会分配这个代码所需要的栈空间大小给他，但是这个程序可以运行在虚拟的更大的栈上。
+
+系统调用也为内存保护带来了问题，大部分系用调用接口让用户程序传递一个指针参数给内核，这些指针指向的是用户的缓冲区，通过这种方式，系统调用在执行的时候就可以解引用这些指针，但是这里有两个问题：
+
+1. 内核中的page fault比用户态的page fault更加严重，如果内核在维护自己的数据结构的时候抛出一个page fault，这是一个内核bug，并且fault处理程序会终止整个内核，但是当内核解引用用户程序的指针的时候，需要一个机制来分辨此时出现的fage fault是由用户程序产生的。
+2. 内核通常比用户程序有更高的内存访问权限。用户可能要传递一个指针给系统调用，这个指针指向的区域是内核可以进行读写，但是用户程序不能，内核必须小的不要去解引用这个指针，否则内核的重要信息可能被泄露。
+
+现在我们需要仔细检查由用户传递来的指针指向的空间来解决上面的两个问题。当一个程序传递给内核一个指针的时候，内核会检查这个地址是在整个地址空间的用户地址空间部分，并且页表也进行内存的操作。
+
+### Exercise 9
+
+修改kern/trap.c文件，使其能够实现，当在内核模式下发生page fault，trap.c会终止。
+
+```c
+void
+page_fault_handler(struct Trapframe *tf)
+{
+	uint32_t fault_va;
+
+	// Read processor's CR2 register to find the faulting address
+	fault_va = rcr2();
+
+	// Handle kernel-mode page faults.
+
+	// LAB 3: Your code here.
+    // 检查最后一位css 的cpl位。如果是0的话，就是内核态。
+	if(tf->tf_cs && 0x11 == 0){
+		panic("Page_fault in kernel mode, fault adress %d.\n", fault_va);
+	}
+
+	// We've already handled kernel-mode exceptions, so if we get here,
+	// the page fault happened in user mode.
+
+	// Destroy the environment that caused the fault.
+	cprintf("[%08x] user fault va %08x ip %08x\n",
+		curenv->env_id, fault_va, tf->tf_eip);
+	print_trapframe(tf);
+	env_destroy(curenv);
+}
+```
+
+```c
+
+//
+// Check that an environment is allowed to access the range of memory
+// [va, va+len) with permissions 'perm | PTE_P'.
+// Normally 'perm' will contain PTE_U at least, but this is not required.
+// 'va' and 'len' need not be page-aligned; you must test every page that
+// contains any of that range.  You will test either 'len/PGSIZE',
+// 'len/PGSIZE + 1', or 'len/PGSIZE + 2' pages.
+//
+// A user program can access a virtual address if (1) the address is below
+// ULIM, and (2) the page table gives it permission.  These are exactly
+// the tests you should implement here.
+//
+// If there is an error, set the 'user_mem_check_addr' variable to the first
+// erroneous virtual address.
+//
+// Returns 0 if the user program can access this range of addresses,
+// and -E_FAULT otherwise.
+//
+int
+user_mem_check(struct Env *env, const void *va, size_t len, int perm)
+{
+	// LAB 3: Your code here.
+	char *start = ROUNDDOWN((char *)va, PGSIZE);
+	char *end = ROUNDUP((char *)(va + len), PGSIZE);
+	//基本思路是将地址段内的值，全部找到他的PTE,然后利用PTE查看它的权限。
+	pte_t *pte = NULL;
+	for(; start < end; start += PGSIZE){
+        // 找到 PTE
+		pte = pgdir_walk(env->env_pgdir, (void *)start, 0);
+        // 检查权限，本来这里的perm应该是要检查PTE_U的，但是调用的user_mem_assert里
+        // 已经将perm | PTE_U过了，所以在此省略。
+		if((int)start > ULIM || pte == NULL || ((uint32_t)(*pte) & perm) != perm){
+            // 确定第一个出错的地址。
+			if(start == ROUNDDOWN((char *)va, PGSIZE)){
+				user_mem_check_addr = (uintptr_t)va;
+			}else{
+				user_mem_check_addr = (uintptr_t)start;
+			}
+			return -E_FAULT;
+		}
+	}
+	return 0;
+}
+
+```
+
+### Exercise 10
+
+运行一下user/evilhello。结束
