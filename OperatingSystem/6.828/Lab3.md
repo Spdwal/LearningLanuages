@@ -746,3 +746,27 @@ int mon_stepi(int argc, char ** argv, struct Trapframe *tf){
 }
 ```
 
+```c
+static struct Command commands[] = {
+	{ "help", "Display this list of commands", mon_help },
+	{ "kerninfo", "Display information about the kernel", mon_kerninfo },
+	{ "continue", "Continue running untill the next break point.", mon_continue},
+	{ "stepi", "Step in the next instruction.", mon_stepi}
+};
+```
+
+monitor函数实际上是调用了runcmd函数，在数组里面寻找和命令相关的函数进行调用，以上函数返回-1，退出了monitor函数，等待下一个brk中断的产生。每一个断点中断，就是一次monitor函数的调用。
+
+### Questions
+
+3. 断点的test case产生一个断点异常或者一个普通的保护异常，这取决于你如何初始化IDT中的断点entry。为什么？你需要怎么样做才能得到一个我们想要的断点异常，而不是general protection exception。
+
+因为优先级的原因，我们在设置T_BRK的时候将它的特权级设置为3，所以用户态代码也可以使用触发break point exception，如果将它的特权级设置为大于用户态代码的特权级，那么就会触发general protection exception。
+
+4. 你怎么看这个机制，特别是user/softint测试代码的机制。
+
+为了保护内核态代码不被用户态代码修改。
+
+## System call
+
+用户态代码会要求内核帮助他实现系统调用。当用户调用一个系统调用，处理器进入内核态。处理器和内核合作将用户程序的状态保存下来，内核运行相应的系统调用代码，然后返回到用户程序继续执行。而用户程序到底是如何得到操作系统的注意的，以及他如何说明操作系统要做什么事情，这个有很多不同的实现方式。
