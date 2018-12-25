@@ -716,3 +716,33 @@ trap_dispatch(struct Trapframe *tf)
 }
 ```
 
+### Challenge 
+
+修改JOS kernel monitor，然后我们可以使用continue命令，并且我们可以单步调试指令，你需要弄懂EFLAGS中的各个位的作用，来完成单步调试。
+
+在IA-32文档中查找到如下
+
+TF 陷阱(第8位)置1是调试状态下的单步执行，置0是禁用单步执行。在单步执行模 
+
+式下处理器在每条指令后产生一个调试异常，这样在每条指令执行后都可以查看执 行程序的状态。如果程序用POPF、POPFD或者IRET指令修改TF标志，那么调试异常 就在执行POPF、POPFD或者IRET指令后产生。
+
+所以调试continue和setpi也就是分别吧TF位置0或者置1。代码如下。 
+
+```c
+int mon_continue(int argc, char **argv, struct Trapframe *tf){
+	if(tf == NULL){
+		panic("Error, No TrapFrame.\n");
+	}
+	tf->tf_eflags &= ~(FL_TF);
+	return -1;
+}
+
+int mon_stepi(int argc, char ** argv, struct Trapframe *tf){
+	if(tf == NULL){
+		panic("Error, No TrapFrame.\n");
+	}
+	tf->tf_eflags |= FL_TF;
+	return -1;
+}
+```
+
