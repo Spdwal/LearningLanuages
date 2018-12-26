@@ -976,6 +976,8 @@ libmain(int argc, char **argv)
 
 修改kern/trap.c文件，使其能够实现，当在内核模式下发生page fault，trap.c会终止。
 
+最后，改变kern/kdebug.c中的debuginfo_eip来调用user_memcheck来检查usd,stabs和stabstr, 如果现在在调试器中调用backtrace的话，可以在内核因为page fault终止之前看到backtrace信息，什么导致了page fault的发生，我们并不需要修复它，但是需要明白它是为什么。
+
 ```c
 void
 page_fault_handler(struct Trapframe *tf)
@@ -1051,6 +1053,8 @@ user_mem_check(struct Env *env, const void *va, size_t len, int perm)
 }
 
 ```
+
+用户态程序的开始是用iret跳转过来的，并没有象内核代码一样将最初的ebp设置为0，所以ebp一直取不到0，然后ebp无限向上走，最后引发了page fault。
 
 ### Exercise 10
 
