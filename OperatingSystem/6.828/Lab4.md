@@ -1,4 +1,4 @@
-# Part A： multiprocessor support and cooperative multitasking
+# nPart A： multiprocessor support and cooperative multitasking
 
 在这个lab的第一部分，我们会扩展JOS让他运行在一个多处理器的系统上，然后完成一下JOS的系统调用，来允许用户态环境可以产生一个新的环境。我们可以完成合作的循环调度，从而允许内核通过使环境自愿放弃对cpu的占用来切换环境，在第三部分，我们会完成抢先调度，他会允许内核从用户环境中获得CPU的资源，然后将它分配给另一个环境。
 
@@ -316,3 +316,71 @@ lgdt MPBOOTPHYS(gdtdesc)
 ```
 
 通过查看obj/boot/boot.asm，发现boot中的代码被连接在0x7c00，而mpentry作为内核代码，被连接在KERNBASE之上，所以需要进行地址转换。
+
+## Per-CPU state and Initialization
+
+在写一个多处理器系统的时候，有一个非常重要的方面就是区别每一个处理器的状态对另一个处理器都是私有的，然后还有一些全局状态是所有处理器共有的。kern/cpu.h中定义了大部分的处理器状体啊，包括了结构体CpuInfo,他保存了每一个cpu的值，cpunum(),返回正在处理的他CPU的ID，这个值可以应用来cpus这个数组里面，而thiscpu就是一个指向当前的CPU结构体CpuInfo宏的值。
+
+以下是你需要关注的Cpu状态：
+
++ 每一个CPU的内核栈。
+
+  因为每一个CPU都可以同步陷入内核，所以我们需要为每一个CPU准备一个内核栈，来阻止他们影响彼此的运行，数组percpu_kstacks\[NCPU]\[KSTKSIZE]为他们提供了内核栈的空间。
+
++ 每一个CPU的TSS和TSS描述符
+
+  一个单独CPU的TSS是必要的，他用来指定每一个CPU的栈的位置，CPUi的TSS被保存在cpus[i].cpu_ts中，并且TSS描述符在GDT条目gdt[(GD_TSS0 >> 3) + i]中，kern/trap.c中的全局数据ts将会失效。
+
++ 每一个CPU的当前环境指针
+
+  每一个CPU可以运行不同的用户进程，所以我们将symbol curenv改成了cpus[cpunum()].cpu_env。或者是thiscpu->cpu_env。他们指向当前CPU运行的环境。
+
++ 每一个cpu的系统寄存器
+
+  所有的寄存器，包括系统寄存器，都是对于CPU来说是私有的，所以用来初始化寄存器的函数，例如lcr3，ltr，lgdt等等，必须在每一个CPU上运行一次，函数env_init_percpu和trap_init_percpu正是用来做这个的。
+
+如果你写了一些CPU初始化的函数，一定记得要将所有的CPU初始化全部更改掉。
+
+### Exercise 3
+
+编辑mem_init_mp(kern/pmap.c)来映射每一个cpu栈从KSTACKTOP开始，就好像在inc/memlayout.h中一样，每一个栈的大小是KSTASIZE+未映射保护页KSTKGAP。我们的代码应该传递新的检查在check_kern_pgdir。
+
+```c
+
+// Modify mappings in kern_pgdir to support SMP
+//   - Map the per-CPU stacks in the region [KSTACKTOP-PTSIZE, KSTACKTOP)
+//
+static void
+mem_init_mp(void)
+{
+	// Map per-CPU stacks starting at KSTACKTOP, for up to 'NCPU' CPUs.
+	//
+	// For CPU i, use the physical memory that 'percpu_kstacks[i]' refers
+	// to as its kernel stack. CPU i's kernel stack grows down from virtual
+	// address kstacktop_i = KSTACKTOP - i * (KSTKSIZE + KSTKGAP), and is
+	// divided into two pieces, just like the single stack you set up in
+	// mem_init:
+	//     * [kstacktop_i - KSTKSIZE, kstacktop_i)
+	//          -- backed by physical memory
+	//     * [kstacktop_i - (KSTKSIZE + KSTKGAP), kstacktop_i - KSTKSIZE)
+	//          -- not backed; so if the kernel overflows its stack,
+	//             it will fault rather than overwrite another CPU's stack.
+	//             Known as a "guard page".
+	//     Permissions: kernel RW, user NONE
+	//
+	// LAB 4: Your code here:
+	uintptr_t kstacktop_i;
+	uint32_t kstack_size = KSTKSIZE + KSTKGAP;
+	for(int i =0; i < NCPU; i++){
+		kstacktop_i = KSTACKTOP - i * (kstack_size);
+		boot_map_region(kern_pgdir, kstacktop_i - KSTKSIZE, KSTKSIZE,  PADDR(percpu_kstacks[i]), PTE_W);
+	}
+	
+
+}
+```
+
+按照注释来，很简单。
+
+### Exercise 4
+
