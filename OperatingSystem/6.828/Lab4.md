@@ -416,11 +416,11 @@ trap_init_percpu(void)
 	// user space on that CPU.
 	//
 	// LAB 4: Your code here:
-	thiscpu->ts.ts_esp0 = percpu_kstacks[cpunum()];
-	thiscpu->ts.ts_ss0 = GD_KD;
-	thiscpu->ts.ts_iomb = sizeof(struct Taskstate);
+	thiscpu->cpu_ts.ts_esp0 = (uintptr_t)percpu_kstacks[cpunum()];
+	thiscpu->cpu_ts.ts_ss0 = GD_KD;
+	thiscpu->cpu_ts.ts_iomb = sizeof(struct Taskstate);
 
-	gdt[GD_TSS0 >> 3 + cpunum()] = SEG16(STS_T32A, (uint32_t)(&(thiscpu->ts)), sizeof(struct Taskstate) - 1, 0);
+	gdt[GD_TSS0 >> 3 + cpunum()] = SEG16(STS_T32A, (uint32_t)(&(thiscpu->cpu_ts)), sizeof(struct Taskstate) - 1, 0);
 	gdt[GD_TSS0 >> 3 + cpunum()].sd_s = 0;
     // 取编号，既然GD_TSS0没有右移三位，那么我们的cpu编号就要左移3位。
 	ltr(GD_TSS0 + cpunum() << 3);
@@ -443,5 +443,216 @@ trap_init_percpu(void)
 	/* // Load the IDT */
 	/* lidt(&idt_pd); */
 }
+```
+
+如果成功的话，使用make qemu CPUS=4或者make qemu-nox CPUS=4就会出现如下输出：
+
+>```
+>...
+>Physical memory: 66556K available, base = 640K, extended = 65532K
+>check_page_alloc() succeeded!
+>check_page() succeeded!
+>check_kern_pgdir() succeeded!
+>check_page_installed_pgdir() succeeded!
+>SMP: CPU 0 found 4 CPU(s)
+>enabled interrupts: 1 2
+>SMP: CPU 1 starting
+>SMP: CPU 2 starting
+>SMP: CPU 3 starting
+>```
+
+## Locking
+
+我们的代码现在循环在mp_main的初始化AP中，在让AP走的更远之前，我们需要第一个地址调经竞争，当CPU们同时运行内核代码的时候，最简单的方法是使用一个大的内核锁，大内核锁是一个简单的全局锁，当人意一个环境进入内核模式的时候，他都被加锁，并且在进入用户模式的时候被解锁。在这种模式下，用户态程序可以并行的运行在CPU上，但是只有一个程序可以运行在内核态下，其他需要进入内核态的程序都需要等待。
+
+kern/spinlock.h声明了大内核锁，他是kernel_lock，他也提供了lock_kernel函数和unlock_kernel函数来加锁解锁，我们需要在4个地方使用大内核锁。
+
++ 在i386_init()，中，在BSP唤醒其他CPU之前加锁。
++ 在mp_main中，在初始化AP之后加锁，然后调用sched_yield函数来运行AP上的程序。
++ 在trap函数中，当从用户态陷入到内核态的时候加锁，为了检查一个trap到底是用户态下发生的还是内核态下发生的，检查tr_cs的低位即可。
++ 在env_run函数中，在转化成为用户态前加锁，不要太早或者太晚做这件事情，这可能会引起条件竞争或者是死锁。
+
+### Exercise 5
+
+使用lock_kernel和unlock_kernel完成上面所说的锁。
+
+```c
+
+void
+i386_init(void)
+{
+	// Initialize the console.
+	// Can't call cprintf until after we do this!
+	cons_init();
+
+	cprintf("6828 decimal is %o octal!\n", 6828);
+	cprintf("x=%d, y=%d\n", 3);
+
+	// Lab 2 memory management initialization functions
+	mem_init();
+
+	// Lab 3 user environment initialization functions
+	env_init();
+	trap_init();
+
+	// Lab 4 multiprocessor initialization functions
+	mp_init();
+	lapic_init();
+
+	// Lab 4 multitasking initialization functions
+	pic_init();
+
+	// Acquire the big kernel lock before waking up APs
+	// Your code here:
+	lock_kernel();
+	// Starting non-boot CPUs
+	boot_aps();
+
+#if defined(TEST)
+	// Don't touch -- used by grading script!
+	ENV_CREATE(TEST, ENV_TYPE_USER);
+#else
+	// Touch all you want.
+	ENV_CREATE(user_primes, ENV_TYPE_USER);
+#endif // TEST*
+
+	// Schedule and run the first user environment!
+	sched_yield();
+}
+
+```
+
+```c
+
+// Setup code for APs
+void
+mp_main(void)
+{
+	// We are in high EIP now, safe to switch to kern_pgdir 
+	lcr3(PADDR(kern_pgdir));
+	cprintf("SMP: CPU %d starting\n", cpunum());
+
+	lapic_init();
+	env_init_percpu();
+	trap_init_percpu();
+	xchg(&thiscpu->cpu_status, CPU_STARTED); // tell boot_aps() we're up
+
+	// Now that we have finished some basic setup, call sched_yield()
+	// to start running processes on this CPU.  But make sure that
+	// only one CPU can enter the scheduler at a time!
+	//
+	// Your code here:
+	lock_kernel();
+	sched_yield();
+
+	// Remove this after you finish Exercise 6
+	for (;;);
+}
+```
+
+```C
+
+void
+trap(struct Trapframe *tf)
+{
+	// The environment may have set DF and some versions
+	// of GCC rely on DF being clear
+	asm volatile("cld" ::: "cc");
+
+	// Halt the CPU if some other CPU has called panic()
+	extern char *panicstr;
+	if (panicstr)
+		asm volatile("hlt");
+
+	// Re-acqurie the big kernel lock if we were halted in
+	// sched_yield()
+	if (xchg(&thiscpu->cpu_status, CPU_STARTED) == CPU_HALTED)
+		lock_kernel();
+	// Check that interrupts are disabled.  If this assertion
+	// fails, DO NOT be tempted to fix it by inserting a "cli" in
+	// the interrupt path.
+	assert(!(read_eflags() & FL_IF));
+
+	if ((tf->tf_cs & 3) == 3) {
+		// Trapped from user mode.
+		// Acquire the big kernel lock before doing any
+		// serious kernel work.
+		// LAB 4: Your code here.
+		lock_kernel();
+		assert(curenv);
+
+		// Garbage collect if current enviroment is a zombie
+		if (curenv->env_status == ENV_DYING) {
+			env_free(curenv);
+			curenv = NULL;
+			sched_yield();
+		}
+
+		// Copy trap frame (which is currently on the stack)
+		// into 'curenv->env_tf', so that running the environment
+		// will restart at the trap point.
+		curenv->env_tf = *tf;
+		// The trapframe on the stack should be ignored from here on.
+		tf = &curenv->env_tf;
+	}
+
+	// Record that tf is the last real trapframe so
+	// print_trapframe can print some additional information.
+	last_tf = tf;
+
+	// Dispatch based on what type of trap occurred
+	trap_dispatch(tf);
+
+	// If we made it to this point, then no other environment was
+	// scheduled, so we should return to the current environment
+	// if doing so makes sense.
+	if (curenv && curenv->env_status == ENV_RUNNING)
+		env_run(curenv);
+	else
+		sched_yield();
+}
+```
+
+```c
+
+// Context switch from curenv to env e.
+// Note: if this is the first call to env_run, curenv is NULL.
+//
+// This function does not return.
+//
+void
+env_run(struct Env *e)
+{
+	// Step 1: If this is a context switch (a new environment is running):
+	//	   1. Set the current environment (if any) back to
+	//	      ENV_RUNNABLE if it is ENV_RUNNING (think about
+	//	      what other states it can be in),
+	//	   2. Set 'curenv' to the new environment,
+	//	   3. Set its status to ENV_RUNNING,
+	//	   4. Update its 'env_runs' counter,
+	//	   5. Use lcr3() to switch to its address space.
+	// Step 2: Use env_pop_tf() to restore the environment's
+	//	   registers and drop into user mode in the
+	//	   environment.
+
+	// Hint: This function loads the new environment's state from
+	//	e->env_tf.  Go back through the code you wrote above
+	//	and make sure you have set the relevant parts of
+	//	e->env_tf to sensible values.
+
+	// LAB 3: Your code here.
+	if(curenv != NULL && curenv->env_status == ENV_RUNNING){
+		curenv->env_status = ENV_RUNNABLE;
+	}
+
+	curenv = e;
+	curenv->env_status = ENV_RUNNING;
+	curenv->env_runs++;
+	lcr3(PADDR(curenv->env_pgdir));
+    // lab4
+	unlock_kernel();
+	env_pop_tf(&curenv->env_tf);
+}
+
 ```
 
