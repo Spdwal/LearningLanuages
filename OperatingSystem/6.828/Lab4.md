@@ -61,9 +61,10 @@ mmio_map_region(physaddr_t pa, size_t size)
 	// Your code here:
     // 使用boot_map_region来完成映射，权限位的话PTE_P是必须加的，然后加入
     // 注释中所要求的PTE_PCD和PTE_PWT。
+    // 如果没有PTE_W，之后的lab会出现错误。
     
 	uintptr_t result = base;
-	boot_map_region(kern_pgdir, base, ROUNDUP(size, PGSIZE), PTE_PCD | PTE_PWT | PTE_P);
+	boot_map_region(kern_pgdir, base, ROUNDUP(size, PGSIZE), PTE_PCD | PTE_PWT | PTE_W);
     // 因为需要多次的
 	base += ROUNDUP(size, PGSIZE);
 	if(base > MMIOLIM){
@@ -661,4 +662,204 @@ env_run(struct Env *e)
 2.已经使用了一个大内核锁来保证同一个时间一个CPU可以跑这个内核代码，那为什么我们还需要为每一个CPU区分一个内核栈，描述一个场景，使用一个共享的内核栈会导致错误，即使是有大内核锁的存在。
 
 当一个线程正在处理用户态的中断，内核栈中存储了栈帧，但是此时另一个线程的用户态程序也发生了中断，此时中断上下文也会被压栈，然后调用trap启动大内核锁，这是栈帧就被破坏掉了。
+
+## Round-Robin Scheduling
+
+我们的下一个任务是使JOS内核可以使用轮询调度算法在数个环境之中跳转。轮询调度算法在JOS工作如下：
+
++ kern/sched.c中的sched_yield函数，是为了选择一个新的运行环境而定义的。他使用线性搜索的方式循环搜索envs数组，运行在前一个运行环境之后的环境，或者直接运行数组头的环境，找到他第一个找到的状态为ENV_RUNNABLE的环境，然后调用env_run函数来运行环境。
++ sched_yield函数一定不会同时在两个CPU上运行同一个环境，它会告诉我们一个环境正在运行在一个cpu上，因为它的状态是ENV__RUNNING。
++ lab提供了一个新函数叫sys_yeild，它被用来调用内核的sched_yield函数，然后自愿的放弃CPU资源给其他环境
+
+### Exercise 6
+
+在sched_yield中完成轮询调度算法，别忘了改动sys_call来调用sys_yield()。另外记得在mp_main中调用sched_yield。改动kern/init.c来穿件3个或者更多的环境来运行user/yield.c这个程序。
+
+运行make qemu，在结束之前，我们因该看到环境之间来回切换了5此。可以使用多个CPU进行测试，使qemu cpu = 2。
+
+```
+...
+Hello, I am environment 00001000.
+Hello, I am environment 00001001.
+Hello, I am environment 00001002.
+Back in environment 00001000, iteration 0.
+Back in environment 00001001, iteration 0.
+Back in environment 00001002, iteration 0.
+Back in environment 00001000, iteration 1.
+Back in environment 00001001, iteration 1.
+Back in environment 00001002, iteration 1.
+...
+```
+
+当yield程序结束后，系统上应该没有可以运行的程序，调度应该运行JOS的monitor，如果这些没有发生，那么修正你的程序。
+
+```c
+
+// Choose a user environment to run and run it.
+void
+sched_yield(void)
+{
+	struct Env *idle;
+
+	// Implement simple round-robin scheduling.
+	//
+	// Search through 'envs' for an ENV_RUNNABLE environment in
+	// circular fashion starting just after the env this CPU was
+	// last running.  Switch to the first such environment found.
+	//
+	// If no envs are runnable, but the environment previously
+	// running on this CPU is still ENV_RUNNING, it's okay to
+	// choose that environment.
+	//
+	// Never choose an environment that's currently running on
+	// another CPU (env_status == ENV_RUNNING). If there are
+	// no runnable environments, simply drop through to the code
+	// below to halt the cpu.
+
+	// LAB 4: Your code here.
+	bool flag = false;
+	if(curenv == NULL){
+		idle = envs;
+	}else{
+		idle = envs + 1;
+	}
+	for(struct Env*e = idle; e != envs + NENV; e ++){
+		if(e->env_status == ENV_RUNNABLE){
+			flag = true;
+			env_run(e);
+			break;
+		}
+	}
+
+	if(flag == false){
+		for(struct Env *e = envs; e != idle; e++){
+			if(e->env_status == ENV_RUNNABLE){
+				flag = true;
+				env_run(e);
+				break;
+			}
+		}
+	}
+
+	if(flag == false && curenv != NULL && curenv->env_status == ENV_RUNNING){
+		flag = true;
+		env_run(curenv);
+	}
+	if(flag == false){
+		sched_halt();
+	}
+	
+	// sched_halt never returns
+	sched_halt();
+}
+
+```
+
+```c
+
+void
+i386_init(void)
+{
+	// Initialize the console.
+	// Can't call cprintf until after we do this!
+	cons_init();
+
+	cprintf("6828 decimal is %o octal!\n", 6828);
+	cprintf("x=%d, y=%d\n", 3);
+
+	// Lab 2 memory management initialization functions
+	mem_init();
+
+	// Lab 3 user environment initialization functions
+	env_init();
+	trap_init();
+
+	// Lab 4 multiprocessor initialization functions
+	mp_init();
+	lapic_init();
+
+	// Lab 4 multitasking initialization functions
+	pic_init();
+
+	// Acquire the big kernel lock before waking up APs
+	// Your code here:
+	lock_kernel();
+	// Starting non-boot CPUs
+	boot_aps();
+
+#if defined(TEST)
+	// Don't touch -- used by grading script!
+	ENV_CREATE(TEST, ENV_TYPE_USER);
+#else
+	// Touch all you want.
+	ENV_CREATE(user_primes, ENV_TYPE_USER);
+
+#endif // TEST*
+	ENV_CREATE(user_yield, ENV_TYPE_USER);
+	ENV_CREATE(user_yield, ENV_TYPE_USER);
+	ENV_CREATE(user_yield, ENV_TYPE_USER);
+	// Schedule and run the first user environment!
+	sched_yield();
+}
+```
+
+```c
+// Dispatches to the correct kernel function, passing the arguments.
+int32_t
+syscall(uint32_t syscallno, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4, uint32_t a5)
+{
+	// Call the function corresponding to the 'syscallno' parameter.
+	// Return any appropriate return value.
+	// LAB 3: Your code here.
+
+	// panic("syscall not implemented");
+
+	switch (syscallno) {
+	case SYS_cputs:
+		return sys_cputs((const char*)a1, (size_t) a2);
+	case SYS_cgetc:
+		return sys_cgetc();
+	case SYS_env_destroy:
+		return sys_env_destroy((envid_t) a1);
+	case SYS_getenvid:
+		return sys_getenvid();
+	case SYS_yield:
+		return sys_yield();
+	case NSYSCALLS:
+		return 0;
+	default:
+		return -E_INVAL;
+	}
+}
+```
+
+最后运行make qemu CPUS=2
+
+```c
+[00000000] new env 00001000
+[00000000] new env 00001001
+[00000000] new env 00001002
+[00000000] new env 00001003
+Hello, I am environment 00001002.
+Hello, I am environment 00001002.
+Hello, I am environment 00001002.
+Back in environment 00001002, iteration 0.
+Back in environment 00001002, iteration 0.
+Back in environment 00001002, iteration 0.
+Back in environment 00001002, iteration 1.
+Back in environment 00001002, iteration 1.
+Back in environment 00001002, iteration 1.
+Back in environment 00001002, iteration 2.
+Back in environment 00001002, iteration 2.
+Back in environment 00001002, iteration 2.
+Back in environment 00001002, iteration 3.
+Back in environment 00001002, iteration 3.
+Back in environment 00001002, iteration 3.
+Back in environment 00001002, iteration 4.
+Back in environment 00001002, iteration 4.
+Back in environment 00001002, iteration 4.
+All done in environment 00001002.
+All done in environment 00001002.
+All done in environment 00001002.
+```
 
