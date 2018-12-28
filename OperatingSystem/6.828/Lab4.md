@@ -873,5 +873,294 @@ All done in environment 00001002.
 
    不保存旧环境，就没有办法在之后重新读取它的trapframe来获取它的全部寄存器。
 
-   在trap函数中保存了env_tf。
+   保存在_alltraps，回复发生在env.c中的env_pop_tf函数。
+
+## System Calls for Environment Creation
+
+尽管你的内核还没有能力在多个不同的用户态环境中切换，它始终只能执行内核最初设定好的程序，现在我们即将实现一个新的系统调用，它允许进程创建，并且开始新的进程。
+
+UNIX提供了fork这个系统调用来创建进程，fork将会拷贝父进程的整个地址空间来创建子进程。父子进程在用户前仅有的区别是他们的进程号和父进程号不同，(分别为getpid和getppid的返回值)，在父进程中，fork返回子进程的id，在子进程中fork返回0。默认来说，每一个进程，都有它的私有地址空间，而且每一个进程的内存修改对其他的都是可以见的。
+
+我们将会完成一个有一点不同，更加原始一点的JOS系统调用来创建新的用户环境，设计的系统调用如下：
+
++ sys_exofork：这个系统调用会创建一个空白进程，在其用户空间中没有映射任何物理内存，并且它是不可运行的。这个新的环境会和父进程拥有相同的寄存器状态。在父进程中，sys_exofork会返回envid_t类型的子进程id，或者是一个负的错误码，表示创建环境失败。在子即成中，它会返回0。因为子进程的states会被标记为不可运行，所以sys_exofork会在它的父进程允许子进程运行之后在子进程中返回。
++ Sys_env_set_status：将特定线程的status设置为ENV_RUNNABLE或者是ENV_NOT_RUNNABLE。这个系统调用将会允许一个新的线程可以运行，当它的地址空间和寄存器状态被完全初始化后。
++ Sys_page_alloc：用来分配物理地址并且将它的虚拟地址映射在纸上。
++ Sys_page_ map：从进程中复制一个页映射到另一个进程，即是内存共享。
++ sys_page_umap：删除到指定进程的指定虚拟地址的映射。
+
+在以上所有接受环境id的系统调用，JOS内核支持一个约定，即是值为0表示当前环境，这个约定由kern/env.c中的envid2env函数来实施。
+
+我们的测试程序user/dumbfork.c中提供了一个类似fork的原始实现，这个测试程序使用上面的系统调用来创建和运行带有自己空间副本的子环境，然后使用前面联系中的sys_yield来回切换这两个环境，父节点在在10次迭代后推出。子节点在20次迭代后退出。
+
+### Exercise 7
+
+完成上面所提到的所有的在kern/syscall.c中的系统调用，并且确定syscall会调用他们，你会需要使用到kern/pmap.c和kern/env中的许多函数，特别是envid2env()，现在来说的话，你每次调用envid2env函数，你可以在权限位上传入参数1，确保你检查了所有的不合法的系统调用参数，如果遇到了不合法的参数，那么返回-E_INVAL，使用user/dumbfork来测试素有的代码，然后确保它确实可以运行。
+
+```c
+// Allocate a new environment.
+// Returns envid of new environment, or < 0 on error.  Errors are:
+//	-E_NO_FREE_ENV if no free environment is available.
+//	-E_NO_MEM on memory exhaustion.
+static envid_t
+sys_exofork(void)
+{
+	// Create the new environment with env_alloc(), from kern/env.c.
+	// It should be left as env_alloc created it, except that
+	// status is set to ENV_NOT_RUNNABLE, and the register set is copied
+	// from the current environment -- but tweaked so sys_exofork
+	// will appear to return 0.
+	struct Env *e;
+	envid_t result = env_alloc(&e, curenv->env_id);
+	if(result < 0){
+		return result;
+	}
+	
+	e->env_status = ENV_NOT_RUNNABLE;
+	e->env_tf = curenv->env_tf;
+	e->env_tf.tf_regs.reg_eax = 0;
+	return e->env_id;
+	// LAB 4: Your code here.
+	// panic("sys_exofork not implemented");
+}
+```
+
+经过这个代码，长久以来我对于fork的疑问解除了，fork其实和传统意义上的返回不一样，他创建了一个新的进程，他的所有的状态都和父进程一样，除了status和eax里的值，然后fork在父进程中正常返回子进程的id。然后调度程序在进程表里面，将这个新创建的env调出来运行，此时他运行在fork调用的这个点上，但是他的eax里保存的是0,所以它的返回值也就是0。
+
+```c
+
+// Set envid's env_status to status, which must be ENV_RUNNABLE
+// or ENV_NOT_RUNNABLE.
+//
+// Returns 0 on success, < 0 on error.  Errors are:
+//	-E_BAD_ENV if environment envid doesn't currently exist,
+//		or the caller doesn't have permission to change envid.
+//	-E_INVAL if status is not a valid status for an environment.
+static int
+sys_env_set_status(envid_t envid, int status)
+{
+	// Hint: Use the 'envid2env' function from kern/env.c to translate an
+	// envid to a struct Env.
+	// You should set envid2env's third argument to 1, which will
+	// check whether the current environment has permission to set
+	// envid's status.
+
+	// LAB 4: Your code here.
+	struct Env *e;
+	if(status != ENV_RUNNABLE && status != ENV_NOT_RUNNABLE){
+		return -E_INVAL;
+	}
+	int result = envid2env(envid, &e, 1);
+	if(result < 0){
+		return -E_BAD_ENV;
+	}
+	e->env_status = status;
+	return 0;
+	// panic("sys_env_set_status not implemented");
+}
+```
+
+跟着注释写，很简单。
+
+```c
+
+// Allocate a page of memory and map it at 'va' with permission
+// 'perm' in the address space of 'envid'.
+// The page's contents are set to 0.
+// If a page is already mapped at 'va', that page is unmapped as a
+// side effect.
+//
+// perm -- PTE_U | PTE_P must be set, PTE_AVAIL | PTE_W may or may not be set,
+//         but no other bits may be set.  See PTE_SYSCALL in inc/mmu.h.
+//
+// Return 0 on success, < 0 on error.  Errors are:
+//	-E_BAD_ENV if environment envid doesn't currently exist,
+//		or the caller doesn't have permission to change envid.
+//	-E_INVAL if va >= UTOP, or va is not page-aligned.
+//	-E_INVAL if perm is inappropriate (see above).
+//	-E_NO_MEM if there's no memory to allocate the new page,
+//		or to allocate any necessary page tables.
+static int
+sys_page_alloc(envid_t envid, void *va, int perm)
+{
+	// Hint: This function is a wrapper around page_alloc() and
+	//   page_insert() from kern/pmap.c.
+	//   Most of the new code you write should be to check the
+	//   parameters for correctness.
+	//   If page_insert() fails, remember to free the page you
+	//   allocated!
+	
+	// LAB 4: Your code here.
+	if(((perm & PTE_U) ==0) || ((perm & PTE_P) == 0)){
+		cprintf("error 1.\n");
+		return -E_INVAL;
+	}
+	if((perm & ~PTE_SYSCALL) != 0){
+		cprintf("error 2.\n");
+		return -E_INVAL;
+	}
+	if((intptr_t)va >= UTOP || PGOFF(va) != 0){
+		cprintf("error 3.\n");
+		return -E_INVAL;
+	}
+
+	struct PageInfo *p = page_alloc(ALLOC_ZERO);
+	if(p == NULL){
+		return -E_NO_MEM;
+	}
+	struct Env *e;
+	envid_t e_id = envid2env(envid, &e, 1);
+
+	if(e_id < 0){
+		return -E_BAD_ENV;
+	}
+
+	e_id = (envid_t) page_insert(e->env_pgdir, p, va, perm);
+	if(e_id < 0){
+		page_free(p);
+		return -E_NO_MEM;
+	}
+
+	return 0;
+	// panic("sys_page_alloc not implemented");
+}
+
+```
+
+```c
+
+// Map the page of memory at 'srcva' in srcenvid's address space
+// at 'dstva' in dstenvid's address space with permission 'perm'.
+// Perm has the same restrictions as in sys_page_alloc, except
+// that it also must not grant write access to a read-only
+// page.
+//
+// Return 0 on success, < 0 on error.  Errors are:
+//	-E_BAD_ENV if srcenvid and/or dstenvid doesn't currently exist,
+//		or the caller doesn't have permission to change one of them.
+//	-E_INVAL if srcva >= UTOP or srcva is not page-aligned,
+//		or dstva >= UTOP or dstva is not page-aligned.
+//	-E_INVAL is srcva is not mapped in srcenvid's address space.
+//	-E_INVAL if perm is inappropriate (see sys_page_alloc).
+//	-E_INVAL if (perm & PTE_W), but srcva is read-only in srcenvid's
+//		address space.
+//	-E_NO_MEM if there's no memory to allocate any necessary page tables.
+static int
+sys_page_map(envid_t srcenvid, void *srcva,
+	     envid_t dstenvid, void *dstva, int perm)
+{
+	// Hint: This function is a wrapper around page_lookup() and
+	//   page_insert() from kern/pmap.c.
+	//   Again, most of the new code you write should be to check the
+	//   parameters for correctness.
+	//   Use the third argument to page_lookup() to
+	//   check the current permissions on the page.
+	
+	// LAB 4: Your code here.
+	if((uintptr_t)srcva >= UTOP || PGOFF(srcva) != 0){
+		return -E_INVAL;
+	}
+	if((uintptr_t)dstva >= UTOP || PGOFF(dstva) != 0){
+		return -E_INVAL;
+	}
+	if((perm & PTE_U) == 0 || (perm & PTE_P) == 0){
+		return -E_INVAL;
+	}
+	if((perm & (~PTE_SYSCALL)) != 0){
+		return -E_INVAL;
+	}
+	struct Env *src_e, *dst_e;
+	if(envid2env(srcenvid, &src_e, 1) < 0){
+		return -E_BAD_ENV;
+	}
+	if(envid2env(dstenvid, &dst_e, 1) < 0){
+		return -E_BAD_ENV;
+	}
+	pte_t *src_ptab;
+	struct PageInfo* p = page_lookup(src_e->env_pgdir, srcva, &src_ptab);
+
+	if(!(*src_ptab & PTE_W) && (perm & PTE_W)){
+		return -E_INVAL;
+	}
+	if(page_insert(dst_e->env_pgdir, p, dstva, perm) < 0){
+		return -E_NO_MEM;
+	}
+
+	return 0;
+	// panic("sys_page_map not implemented");
+}
+
+```
+
+```c
+
+// Unmap the page of memory at 'va' in the address space of 'envid'.
+// If no page is mapped, the function silently succeeds.
+//
+// Return 0 on success, < 0 on error.  Errors are:
+//	-E_BAD_ENV if environment envid doesn't currently exist,
+//		or the caller doesn't have permission to change envid.
+//	-E_INVAL if va >= UTOP, or va is not page-aligned.
+static int
+sys_page_unmap(envid_t envid, void *va)
+{
+	// Hint: This function is a wrapper around page_remove().
+
+	// LAB 4: Your code here.
+	if((uintptr_t)va >= UTOP || PGOFF(va) != 0){
+		return -E_INVAL;
+	}
+	struct Env *e;
+	if(envid2env(envid, &e, 1) < 0){
+		return -E_BAD_ENV;
+	}
+
+	page_remove(e->env_pgdir, va);
+	return 0;
+      	// panic("sys_page_unmap not implemented");
+}
+```
+
+最后记得更改syscall
+
+```c
+
+// Dispatches to the correct kernel function, passing the arguments.
+int32_t
+syscall(uint32_t syscallno, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4, uint32_t a5)
+{
+	// Call the function corresponding to the 'syscallno' parameter.
+	// Return any appropriate return value.
+	// LAB 3: Your code here.
+
+	// panic("syscall not implemented");
+
+	switch (syscallno) {
+	case SYS_cputs:
+		return sys_cputs((const char*)a1, (size_t) a2);
+	case SYS_cgetc:
+		return sys_cgetc();
+	case SYS_env_destroy:
+		return sys_env_destroy((envid_t) a1);
+	case SYS_getenvid:
+		return sys_getenvid();
+	case SYS_yield:
+		return sys_yield();
+	case SYS_exofork:
+		return sys_exofork();
+	case SYS_env_set_status:
+		return sys_env_set_status(a1, a2);
+	case SYS_page_alloc:
+		return sys_page_alloc((envid_t)a1, (void *)a2, (int)a3);
+	case SYS_page_map:
+		return sys_page_map((envid_t)a1, (void *)a2, a3, (void *)a4, (int)a5);
+	case SYS_page_unmap:
+		return sys_page_unmap((envid_t)a1, (void *)a2);
+	case NSYSCALLS:
+		return 0;
+	default:
+		return -E_INVAL;
+	}
+}
+```
 
