@@ -1,4 +1,4 @@
-# nPart A： multiprocessor support and cooperative multitasking
+# Part A： multiprocessor support and cooperative multitasking
 
 在这个lab的第一部分，我们会扩展JOS让他运行在一个多处理器的系统上，然后完成一下JOS的系统调用，来允许用户态环境可以产生一个新的环境。我们可以完成合作的循环调度，从而允许内核通过使环境自愿放弃对cpu的占用来切换环境，在第三部分，我们会完成抢先调度，他会允许内核从用户环境中获得CPU的资源，然后将它分配给另一个环境。
 
@@ -1161,6 +1161,198 @@ syscall(uint32_t syscallno, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4, 
 	default:
 		return -E_INVAL;
 	}
+}
+```
+
+Part A结束
+
+# Part B: copy-on-write Fork
+
+就和我们之前提到的一样，UNIX提供了fork系统调用，来作为系统调用进程创建原语，然后fork调用一个复制函数复制父进程的地址空间，以创建一个新进程。
+
+xv6UNIX通过将所有的数据从父进程处拷贝所有的数据到新的子进程的页表中，这和dumbfork所做的事情一样，这个拷贝操作是fork函数中开销最大的操作。
+
+但是在子进程中对fork的调用之后经常会立即调用exec，这将用一个新的程序替子进程的内存，通常shell就是这么做的，这种情况下，复制父进程空间所花费的时间基本上是浪费的，因为子进程在调用exec之后只会使用很少的内存。
+
+因为这个原因，在最新的UNIX版本中，使用了共享内存，使父进程和子进程共享同一个内存，并映射到他们的地址空间内，直到其中一个进程改变了它。这个技术被称为写时复制。为了做到这一点，内核中fork函数会从父进程中拷贝地址空间的映射到子进程，而不是拷贝所有的内容。然后将所有的共享空间标记为只读。
+
+当两个进程中的一个尝试去写共享的空间的时候，进程会产生一个pgfault ,然后UNIX内核会识别它到底是一个虚拟还是写时复制副本，因此它为出错程序生成一个新的私有的可写的页面副本，通过这种方式，单独的页表只有它在被写入的时候，才会真正的写入，这些优化使fork和exec开销更小。子进程在调用exec之前，只会复制一个page，也即是当前页的栈。
+
+在这个lab的下一部分，我们会完成一个合适的，拥有写时复制的UNIX-LIKEfork函数，作为一个用户历程库。在用户空间实现fork和写时复制支持的有点是内核仍然特别简单，因此更有可能是正确的。它还允许单个用户模式程序为fork()定义自己的语义，需要稍微不同的实现的程序，例如昂贵的总是复制的版本，如dumbfork，可以很容易的提供自己的实现。
+
+## User-level page fault handling
+
+用户级的写时复制fork需要知道写保护页面上的页面错误，所以这才是我们首先需要实现的，写时复制只是用户级页面错误处理的多种可能用途之一。
+
+通常会设置一个地址空间，以便页面错误指示合适需要执行某些操作，例如，大多数UNIX内核最初只映射新进程堆栈区域的单个页，然后随着进程堆栈的增加，按需分配其他堆栈页，并且在尚未映射的堆栈地址上发生页错误，典型的UNIX内核，必须跟踪在进程空间的每个区域发生页错误的时候要采取的操作，例如堆栈区域中的pgfault会分配和映射物理内存的新页面，bss区域中的错误通常会分配一个新页面，然后用0填充它，并且映射它，在按照需求分页的可执行文件的系统中，文本区域中的错误将从磁盘上读取二进制文件的相应页面，然后映射它。
+
+内核需要跟踪很多信息。和传统的UNIX概念不同，你会去选择在用户空间中你对每一种page fault所做的操作，因为这写错误对用户空间的损害较小，这种设计的另外一个好处是允许程序在定义他们的内存区域时有着非常大的灵活性，稍后，我们将使用用户级的页面错误处理来映射和访问基于硬盘的文件系统上的文件。
+
+### Setting the page fault handler
+
+为了处理自己的页面错误，用户环境需要向JOS内核注册页面错误处理程序entrypoint，用户环境使用sys_env_set_pgfault_upcall系统调用注册其页面错误入口点。我们在Env结构中添加了一个新成员env_pgfault_upcall来记录这个信息。
+
+### exercise 8:
+
+实现sys_env_set_pgfault_upcall系统调用，确保在查找目标环境的环境ID时候启用权限检查，因为这是一个危险的系统调用。
+
+```c
+
+// Set the page fault upcall for 'envid' by modifying the corresponding struct
+// Env's 'env_pgfault_upcall' field.  When 'envid' causes a page fault, the
+// kernel will push a fault record onto the exception stack, then branch to
+// 'func'.
+//
+// Returns 0 on success, < 0 on error.  Errors are:
+//	-E_BAD_ENV if environment envid doesn't currently exist,
+//		or the caller doesn't have permission to change envid.
+static int
+sys_env_set_pgfault_upcall(envid_t envid, void *func)
+{
+	// LAB 4: Your code here.
+	struct Env *e = NULL;
+	envid2env(envid, &e, 1);
+
+	if(e == NULL){
+		cprintf("Sys_env_set_tatus: envid2env.\n");
+		return -E_BAD_ENV;
+	}
+	
+	e->env_pgfault_upcall = func;
+
+	return 0;
+	// panic("sys_env_set_pgfault_upcall not implemented");
+}
+
+```
+
+## Normal and exception stacks in User Environments
+
+经过运行之后，一个JOS用户环境会运行在用户栈上，他的ESP寄存器在刚开始运行的时候，指向USTACKTOP，然后吧栈数据push进USTACKTOP -PGSIZE到USTACKTOP-1的中间之间，但是当用户模式下发生了页错误的时候，内核将重新启动在不同堆栈上运行指定的用户级页面处理程序的用户环境。在本质上，我们将使用JOS内核实现代表用户环境的自动堆栈切换，就像x86处理器从用户模式时实现了代表JOS的堆栈切换一样。
+
+JOS用户异常栈页时一个页面大小，其顶部定义为虚拟地址UXSTACKTOP，所以用户异常栈的有效字节时UXSTACKTOP - PGSIZE到UXSTACKTOP -1(包括)。当我们运行在异常栈上的时候，用户态page fault处理函数使用JOS的系统调用来映射一个新的页或者调整映射，以便修复最初导致页面错误的任何问题，然后用户级的页面错误处理程序通过汇编语言的存根返回原是栈上的系统代码。
+
+每个希望支持用户级别页面错误处理的用户环境都需要使用PartA中介绍的sys_page_alloc()系统调用为自己的异常堆栈分配内存。
+
+### Invoking the user page fault handler
+
+我们需要改变kern/trap.c中的pagefault处理函数来处理用户模式下的pagefault，如下所示，我们将在发生错误时将用户环境的状态称为trap时状态。
+
+如果没有pagefault处理函数被寄存器储存，JOS内核会和之前一样销毁用户环境，但是如果有的话，内核会设置一个trapframe在异常栈上，它是一个struct Utrapframe结构体，这个结构体被定义在inc/trap.c上。
+
+```
+                    <-- UXSTACKTOP
+trap-time esp
+trap-time eflags
+trap-time eip
+trap-time eax       start of struct PushRegs
+trap-time ecx
+trap-time edx
+trap-time ebx
+trap-time esp
+trap-time ebp
+trap-time esi
+trap-time edi       end of struct PushRegs
+tf_err (error code)
+fault_va            <-- %esp when handler is run
+```
+
+内核安排用户环境使用在异常栈上运行的页面错误处理函数，回复执行，你必须弄清楚如何执行这一点，fault_va是导致页面错误的虚拟地址。此处少了cs ip，但是多了fault_va，这表明这之间没有发生进程的切换。
+
+如果用户环境在异常发生时已经在异常栈上，那么page fault处理函数本身就有错误。在这种情况下，我们应该在tf->tf_esp下启动新的堆栈框架，而不是在UXSTACKTOP，这时候我们应该先push一个空的23微的字，然后是一个strcut UTrapframe。
+
+测试tf->tf_esp是不是已经存在了用户异常栈里面，检查它是不是在UXSTACKTOP-PGSIZE到TXSTACKTOP-1中间，
+
+### Exerxcise 9
+
+在kern/trap.c中实现page_fault_handler中的代码，需要将页面错误分派给用户模式处理程序，在写入异常栈的时候，一定要采取相当的措施，(如果用户环境耗尽堆栈上的空间，会发生什么？)
+
+```c
+
+void
+page_fault_handler(struct Trapframe *tf)
+{
+	uint32_t fault_va;
+
+	// Read processor's CR2 register to find the faulting address
+	fault_va = rcr2();
+
+	// Handle kernel-mode page faults.
+
+	// LAB 3: Your code here.
+	if(tf->tf_cs && 0x01 == 0){
+		panic("Page_fault in kernel mode, fault adress %d.\n", fault_va);
+	}
+
+	// We've already handled kernel-mode exceptions, so if we get here,
+	// the page fault happened in user mode.
+
+	// Call the environment's page fault upcall, if one exists.  Set up a
+	// page fault stack frame on the user exception stack (below
+	// UXSTACKTOP), then branch to curenv->env_pgfault_upcall.
+	//
+	// The page fault upcall might cause another page fault, in which case
+	// we branch to the page fault upcall recursively, pushing another
+	// page fault stack frame on top of the user exception stack.
+	//
+	// It is convenient for our code which returns from a page fault
+	// (lib/pfentry.S) to have one word of scratch space at the top of the
+	// trap-time stack; it allows us to more easily restore the eip/esp. In
+	// the non-recursive case, we don't have to worry about this because
+	// the top of the regular user stack is free.  In the recursive case,
+	// this means we have to leave an extra word between the current top of
+	// the exception stack and the new stack frame because the exception
+	// stack _is_ the trap-time stack.
+	//
+	// If there's no page fault upcall, the environment didn't allocate a
+	// page for its exception stack or can't write to it, or the exception
+	// stack overflows, then destroy the environment that caused the fault.
+	// Note that the grade script assumes you will first check for the page
+	// fault upcall and print the "user fault va" message below if there is
+	// none.  The remaining three checks can be combined into a single test.
+	//
+	// Hints:
+	//   user_mem_assert() and env_run() are useful here.
+	//   To change what the user environment runs, modify 'curenv->env_tf'
+	//   (the 'tf' variable points at 'curenv->env_tf').
+
+	// LAB 4: Your code here.
+	bool flag = true;
+	if(!curenv->env_pgfault_upcall){
+		flag = false;
+	}
+    // UXSTACKTOP = USTACKTOP + 2 * PGSZE
+	if(fault_va >= UXSTACKTOP || fault_va < UXSTACKTOP - PGSIZE){
+		flag = false;
+	}
+
+	if(flag){
+		struct UTrapframe  *utf;
+	
+		if(tf->tf_esp < UXSTACKTOP && tf->tf_esp >= UXSTACKTOP-PGSIZE){
+			utf = (struct UTrapframe*)(curenv->env_tf.tf_esp - sizeof(struct UTrapframe) - 4);
+		}else{
+			utf = (struct UTrapframe*)(UXSTACKTOP - sizeof(struct UTrapframe));
+		}
+		utf->utf_eflags = tf->tf_eflags;
+		utf->utf_eip   = tf->tf_eip;
+		utf->utf_err   = tf->tf_err;
+		utf->utf_esp   = tf->tf_esp;
+		utf->utf_fault_va = fault_va;
+		utf->utf_regs  = tf->tf_regs;
+		
+		user_mem_assert(curenv, utf, sizeof(struct UTrapframe), PTE_W);
+
+		tf->tf_eip = (uintptr_t) curenv->env_pgfault_upcall;
+		tf->tf_esp = (uintptr_t) utf;
+
+		env_run(curenv);
+	}
+	// Destroy the environment that caused the fault.
+	cprintf("[%08x] user fault va %08x ip %08x\n",
+		curenv->env_id, fault_va, tf->tf_eip);
+	print_trapframe(tf);
+	env_destroy(curenv);
 }
 ```
 
