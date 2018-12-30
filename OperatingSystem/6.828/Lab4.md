@@ -1,3 +1,5 @@
+
+
 # Part A： multiprocessor support and cooperative multitasking
 
 在这个lab的第一部分，我们会扩展JOS让他运行在一个多处理器的系统上，然后完成一下JOS的系统调用，来允许用户态环境可以产生一个新的环境。我们可以完成合作的循环调度，从而允许内核通过使环境自愿放弃对cpu的占用来切换环境，在第三部分，我们会完成抢先调度，他会允许内核从用户环境中获得CPU的资源，然后将它分配给另一个环境。
@@ -1259,7 +1261,7 @@ fault_va            <-- %esp when handler is run
 
 内核安排用户环境使用在异常栈上运行的页面错误处理函数，回复执行，你必须弄清楚如何执行这一点，fault_va是导致页面错误的虚拟地址。此处少了cs ip，但是多了fault_va，这表明这之间没有发生进程的切换。
 
-如果用户环境在异常发生时已经在异常栈上，那么page fault处理函数本身就有错误。在这种情况下，我们应该在tf->tf_esp下启动新的堆栈框架，而不是在UXSTACKTOP，这时候我们应该先push一个空的23微的字，然后是一个strcut UTrapframe。
+如果用户环境在异常发生时已经在异常栈上，那么page fault处理函数本身就有错误。在这种情况下，我们应该在tf->tf_esp下启动新的堆栈框架，而不是在UXSTACKTOP，这时候我们应该先push一个空的32位的字，然后是一个strcut UTrapframe。
 
 测试tf->tf_esp是不是已经存在了用户异常栈里面，检查它是不是在UXSTACKTOP-PGSIZE到TXSTACKTOP-1中间，
 
@@ -1355,4 +1357,172 @@ page_fault_handler(struct Trapframe *tf)
 	env_destroy(curenv);
 }
 ```
+
+## User-mode page fault entrypoint
+
+接下来，我们需要完成汇编历程，来调用c语言的page fault处理程序，然后在原始错误处恢复执行，这个程序集处理程序将使用sys_env_set_pgfault_upcall()向内核注册。
+
+### Exercise 10
+
+在lib/pentry.s中实现_pgfault_upcall历程，有趣的部分是返回导致页面错误的用户代码中的原始位置。我们将直接返回哪里，而不需要内核返回，困难的部分是同时切换堆栈和重新加载EIP。
+
+```nasm
+
+// Page fault upcall entrypoint.
+
+// This is where we ask the kernel to redirect us to whenever we cause
+// a page fault in user space (see the call to sys_set_pgfault_handler
+// in pgfault.c).
+//
+// When a page fault actually occurs, the kernel switches our ESP to
+// point to the user exception stack if we're not already on the user
+// exception stack, and then it pushes a UTrapframe onto our user
+// exception stack:
+//
+//	trap-time esp
+//	trap-time eflags
+//	trap-time eip
+//	utf_regs.reg_eax
+//	...
+//	utf_regs.reg_esi
+//	utf_regs.reg_edi
+//	utf_err (error code)
+//	utf_fault_va            <-- %esp
+//
+// If this is a recursive fault, the kernel will reserve for us a
+// blank word above the trap-time esp for scratch work when we unwind
+// the recursive call.
+//
+// We then have call up to the appropriate page fault handler in C
+// code, pointed to by the global variable '_pgfault_handler'.
+
+.text
+.globl _pgfault_upcall
+_pgfault_upcall:
+	// Call the C page fault handler.
+	pushl %esp			// function argument: pointer to UTF
+	movl _pgfault_handler, %eax
+	call *%eax
+	addl $4, %esp			// pop function argument
+	
+	// Now the C page fault handler has returned and you must return
+	// to the trap time state.
+	// Push trap-time %eip onto the trap-time stack.
+	//
+	// Explanation:
+	//   We must prepare the trap-time stack for our eventual return to
+	//   re-execute the instruction that faulted.
+	//   Unfortunately, we can't return directly from the exception stack:
+	//   We can't call 'jmp', since that requires that we load the address
+	//   into a register, and all registers must have their trap-time
+	//   values after the return.
+	//   We can't call 'ret' from the exception stack either, since if we
+	//   did, %esp would have the wrong value.
+	//   So instead, we push the trap-time %eip onto the *trap-time* stack!
+	//   Below we'll switch to that stack and call 'ret', which will
+	//   restore %eip to its pre-fault value.
+	//
+	//   In the case of a recursive fault on the exception stack,
+	//   note that the word we're pushing now will fit in the
+	//   blank word that the kernel reserved for us.
+	//
+	// Throughout the remaining code, think carefully about what
+	// registers are available for intermediate calculations.  You
+	// may find that you have to rearrange your code in non-obvious
+	// ways as registers become unavailable as scratch space.
+	//
+	// LAB 4: Your code here.
+	// 使esp指向 reg_edi,等于是弹出 err和fault_va
+	add $8, %esp
+	
+	// Restore the trap-time registers.  After you do this, you
+	// can no longer modify any general-purpose registers.
+	// LAB 4: Your code here.
+	// 为了使eip指向正确的地址，
+	// 保存了reg_eax的值
+	movl 32(%esp), %eax
+	// ebx中保存了utf_esp的值
+	// 即是上一个栈的栈顶。
+	movl 40(%esp), %ebx
+	// 此时ebx指向的地址是utf_esp之下的空的那个word。
+	subl $4, %ebx
+	// 更新utf_esp指向原来的utf_esp-4的值，也就是将原来的空出来的字给包括了进来，
+	movl %ebx, 40(%esp)
+	// 将空的字里面放入了utf_eip的值。
+	movl %eax, (%ebx)
+	// Restore eflags from the stack.  After you do this, you can
+	// no longer use arithmetic operations or anything else that
+	// modifies eflags.
+	// LAB 4: Your code here.
+	// 回复寄存器，执行结束后 esp指向utf_eip，不是我们之前设置的那个空字里面的eip
+	popal
+	// Switch back to the adjusted trap-time stack.
+	// LAB 4: Your code here.
+	// 弹出utf_eip
+	addl $4, %esp
+	
+	// 回复 eflags
+	popfl
+	// Return to re-execute the instruction that faulted.
+	// LAB 4: Your code here.
+	// 回复栈帧
+	popl %esp
+	// 此时esp指向的就是我们放入进去空字的那个utf_eip，然后依靠这个eip进行return。
+	// 相当于popl %eip
+	ret
+```
+
+### Exercise 11
+
+在lib/pgfault.c中完成set_pgfault_handler。
+
+```c
+
+//
+// Set the page fault handler function.
+// If there isn't one yet, _pgfault_handler will be 0.
+// The first time we register a handler, we need to
+// allocate an exception stack (one page of memory with its top
+// at UXSTACKTOP), and tell the kernel to call the assembly-language
+// _pgfault_upcall routine when a page fault occurs.
+//
+void
+set_pgfault_handler(void (*handler)(struct UTrapframe *utf))
+{
+	int r;
+
+	if (_pgfault_handler == 0) {
+		// First time through!
+		// LAB 4: Your code here.
+		envid_t env_id = sys_getenvid();
+		r = sys_page_alloc(evn_id, (void *)(UXSTACKTOP - PGSIZE), PTE_U | PTE_W | PTE_P);
+		if(r < 0){
+			panic("pgfault_handler %e", r);
+		}
+
+		r = sys_env_set_pgfault_upcall(env_id, _pgfault_upcall);
+
+		if(r < 0){
+			panic("pgfault_hander %e", r);
+		}
+		// panic("set_pgfault_handler not implemented");
+	}
+
+	// Save handler pointer for assembly to call.
+	_pgfault_handler = handler;
+}
+
+```
+
+## Implementing Copying-on-Write Fork
+
+我们现在有了在用户空间完成写时拷贝fork的能力。
+
+我们在lib/fork.c中为我们的fork提供了一个框架，与dumbfork类似，fork应该创建一个新的空间，然后扫描父环境的整个地址空间，并在子环境中设置相应的页面映射。关键区别在于，虽然dumbfork复制了页面，但是fork最初只复制页面映射，fork只会在某个环境试图写入每个页面的时候复制它。
+
+fork的基本流程如下：
+
+1. 父进程把pgfalut作为一个c击毙嗯的pagefault处理程序，使用我们之前完成的set_pgfault_handler函数。
+2. 父进程调用sys_exfork来创建子进程的环境。
+3. 在UTOP之下所有的可写和写时复制的
 
