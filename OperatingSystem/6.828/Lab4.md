@@ -1523,6 +1523,196 @@ set_pgfault_handler(void (*handler)(struct UTrapframe *utf))
 fork的基本流程如下：
 
 1. 父进程把pgfalut作为一个c击毙嗯的pagefault处理程序，使用我们之前完成的set_pgfault_handler函数。
+
 2. 父进程调用sys_exfork来创建子进程的环境。
-3. 在UTOP之下所有的可写和写时复制的
+
+3. 在UTOP之下所有的可写和写时复制的页面(用PTE_COW标示)，父进程调用duppage将其映射到子进程，同时将其权限修改为只读，并用PTE_COW位与一半的只读页面进行区别。
+
+   异常栈的分配方式不同，你需要分配一个新的页来作为子进程的异常栈，因为page_fault_handler会实实在在的向异常栈写入内容，并且在异常栈上运行。如果异常栈页面都用COW机制，那么久没有能够执行拷贝这个过程的载体了。
+
+4. 父进程会位子进程设置user page falut entry point
+
+5. 子进程就绪，父进程将其设置为runnable
+
+进程第一次往一个COW页面写入内容的时候，会发生page fault。其流程位
+
+1. 内核将page fault传递至_pgfault_upcall，它会调用pgfault处理函数
+2. pgfault检查错误类型，以及页面是否被标记为PTE_COW。
+3. pgfault函数分配一个新的页面，并将fault page的内容拷贝过去，然后将旧的映射覆盖，使其映射到该新页面。
+
+### Exercise 12
+
+完成fork，duppag和pgfauli。然后使用forktree来进行测试。它会有如下输出：
+
+```
+	1000: I am ''
+	1001: I am '0'
+	2000: I am '00'
+	2001: I am '000'
+	1002: I am '1'
+	3000: I am '11'
+	3001: I am '10'
+	4000: I am '100'
+	1003: I am '01'
+	5000: I am '010'
+	4001: I am '011'
+	2002: I am '110'
+	1004: I am '001'
+	1005: I am '111'
+	1006: I am '101'
+	
+```
+
+但是不一定是这个顺序，还有环境id可能会不一样。
+
+```
+
+//
+// User-level fork with copy-on-write.
+// Set up our page fault handler appropriately.
+// Create a child.
+// Copy our address space and page fault handler setup to the child.
+// Then mark the child as runnable and return.
+//
+// Returns: child's envid to the parent, 0 to the child, < 0 on error.
+// It is also OK to panic on error.
+//
+// Hint:
+//   Use uvpd, uvpt, and duppage.
+//   Remember to fix "thisenv" in the child process.
+//   Neither user exception stack should ever be marked copy-on-write,
+//   so you must allocate a new page for the child's user exception stack.
+//
+envid_t
+fork(void)
+{
+	// LAB 4: Your code here.
+	set_pgfault_handler(pgfault);
+	envid_t env_id = sys_exofork();
+	if(env_id < 0){
+		panic("fork: %e", env_id);
+	}
+
+	if(env_id == 0){
+		thisenv = &envs[(ENVX(sys_getenvid()))];
+		return 0;
+	}
+
+
+
+	for(uintptr_t aadr = UTEXT; addr < USTACKTOP; addr += PGSIZE){
+	    // 查看page table和page directory 是否存在
+		if((uvpt[(PDX(addr))] & PTE_P) && (uvpd[PGNUM(addr)] & PTE_P)){
+			duppage(env_id, PGNUM(addr));
+		}
+	}
+
+	int r = sys_page_alloc(env_id, (void *)(UXSTACKTOP - PGSIZE), PTE_P | PTE_W | PTE_U);
+	if(r < 0){
+		panic("fork error: %e", r);
+	}
+
+	if((r = sys_env_set_status(env_id, ENV_RUNNABLE)) < 0){
+		panic("syt_env_set_status error: %e", r);
+	}
+
+	return env_id;
+	// panic("fork not implemented");
+}
+```
+
+```c
+
+//
+// Map our virtual page pn (address pn*PGSIZE) into the target envid
+// at the same virtual address.  If the page is writable or copy-on-write,
+// the new mapping must be created copy-on-write, and then our mapping must be
+// marked copy-on-write as well.  (Exercise: Why do we need to mark ours
+// copy-on-write again if it was already copy-on-write at the beginning of
+// this function?)
+//
+// Returns: 0 on success, < 0 on error.
+// It is also OK to panic on error.
+//
+static int
+duppage(envid_t envid, unsigned pn)
+{
+	int r;
+
+	// LAB 4: Your code here.
+	void *va = (void *)(pn*PGSIZE);
+	envid_t env_id = sys_getenvid();
+
+	int perm = uvpt[pn] & 0xFFF;
+	if((perm & PTE_W) || (perm &PTE_COW)){
+		perm|= PTE_COW;
+		perm &= ~PTE_W;
+	}
+	// 非常重要，使它能被sys_call调用。
+	perm &= PTE_SYSCALL;
+
+	if((r = sys_page_map(env_id, va, envid, va, perm)) < 0){
+		panic("duppage: %e", r);
+	}
+	// 修改权限，重新映射。
+	if((r = sys_page_map(env_id, va, env_id, va, perm)) < 0){
+		panic("duppage: %e", r);
+	}
+	// panic("duppage not implemented");
+	return 0;
+}
+```
+
+```c
+// Custom page fault handler - if faulting page is copy-on-write,
+// map in our own private writable copy.
+//
+static void
+pgfault(struct UTrapframe *utf)
+{
+	void *addr = (void *) utf->utf_fault_va;
+	uint32_t err = utf->utf_err;
+	int r;
+
+	// Check that the faulting access was (1) a write, and (2) to a
+	// copy-on-write page.  If not, panic.
+	// Hint:
+	//   Use the read-only page table mappings at uvpt
+	//   (see <inc/memlayout.h>).
+
+	// LAB 4: Your code here.
+	if((err & FEC_WR) == 0 || (uvpt[PGNUM(addr)] & PTE_COW) == 0){
+		panic("pgfault: invalid user trap frame");
+	}
+	// Allocate a new page, map it at a temporary location (PFTEMP),
+	// copy the data from the old page to the new page, then move the new
+	// page to the old page's address.
+	// Hint:
+	//   You should make three system calls.
+
+	// LAB 4: Your code here.
+	envid_t env_id = sys_getenvid();
+    // 分配一个页面，映射到了交换去PFTEMP这个虚拟地址，
+	if((r = sys_page_alloc(env_id, (void *)PFTEMP, PTE_P | PTE_W| PTE_U)) < 0){
+		panic("pgfault: page alloction failed %e", r);
+	}
+
+	addr = ROUNDDOWN(addr, PGSIZE);
+	// 将addr所在页面拷贝至PFTEMP，此时有两个物理页保存了相同的内容。
+	memmove(PFTEMP, addr, PGSIZE);
+	// 解除对addr的映射
+	if((r = sys_page_unmap(env_id, addr)) < 0){
+		panic("pgfault: page unmap failed %e",r);
+	}
+	// 将addr映射到PFTEMP对应的物理页
+	if((r = sys_page_map(env_id, PFTEMP, envid, addr, PTE_P | PTE_W | PTE_U)) < 0){
+		panic("pgfault: page map failed %e", r);
+	}
+	// 接触了PFTEMP的映射。
+	if((r = sys_page_unmap(env_id, PFTEMP)) < 0){
+		panic("pgfault: page unmap %e", r);
+	}
+	// panic("pgfault not implemented");
+}
+```
 
