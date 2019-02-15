@@ -6,4 +6,6 @@ a.out
 *.aux
 *.log
 *.toc
-Latex/Chapter_*/.texpadtmp/*
+*.aux
+*.log
+*.toc
