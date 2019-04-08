@@ -7,6 +7,7 @@ int main(int argc, char *argv[]){
     } un;
 
     un.s = 0x0102;
+    // the CPU_VENDOR_OS determin by autoconf
     printf("%s: ", CPU_VENDOR_OS);
 
     if(sizeof(short) == 2){
