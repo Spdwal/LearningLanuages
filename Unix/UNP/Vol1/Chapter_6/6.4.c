@@ -31,10 +31,12 @@ int main(int argc, char *argv[]){
     for(;;){
         nready = Poll(client, maxi + 1, INFTIM);
 
+        // new client connection
         if(client[0].revents & POLLRDNORM){
             clilen = sizeof(cliaddr);
             connfd = Accept(listenfd, (SA *) &cliaddr, &clilen);
 
+            // save the connect descriptor
             for(i = 1; i < OPEN_MAX; i++){
                 if(client[i].fd < 0){
                     client[i].fd = connfd;
@@ -57,14 +59,16 @@ int main(int argc, char *argv[]){
             }
         }
 
-
+        // check all clients for data
         for(i = 1; i <= maxi; i++){
             if((sockfd = client[i].fd) < 0){
                 continue;
             }
 
+            // the descriptor is readable or recieved a error
             if(client[i].revents & (POLLRDNORM | POLLERR)){
                 if((n = read(sockfd, buf, MAXLINE)) < 0){
+                    // the connection is reset by client
                     if(errno == ECONNRESET){
                         Close(sockfd);
                         client[i].fd = 01;
@@ -72,6 +76,7 @@ int main(int argc, char *argv[]){
                         err_sys("read error");
                     }
                 }else if(n == 0){
+                    // the client is closed by client
                     Close(sockfd);
                     client[i].fd = -1;
                 }else{
